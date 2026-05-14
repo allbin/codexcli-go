@@ -42,7 +42,46 @@ type InitializeResponse struct {
 // variant is an object. RawMessage keeps both forms addressable without
 // hand-rolling every shape — callers that need the granular form can
 // unmarshal further.
-type AskForApproval json.RawMessage
+//
+// Implementation note: this is a struct wrapper rather than a named
+// alias of json.RawMessage because Go does not inherit methods through
+// a named-type definition. A bare `type AskForApproval json.RawMessage`
+// would lose RawMessage's Marshal/UnmarshalJSON, making the underlying
+// `[]byte` get base64-decoded on the wire.
+type AskForApproval struct {
+	Raw json.RawMessage
+}
+
+// MarshalJSON implements json.Marshaler.
+func (a AskForApproval) MarshalJSON() ([]byte, error) {
+	if len(a.Raw) == 0 {
+		return []byte("null"), nil
+	}
+	return a.Raw, nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (a *AskForApproval) UnmarshalJSON(data []byte) error {
+	a.Raw = append(a.Raw[:0], data...)
+	return nil
+}
+
+// AskForApprovalString returns the bare-string variant if present
+// ("untrusted", "on-failure", "on-request", "never"), or "" for the
+// granular object form.
+func (a AskForApproval) AskForApprovalString() string {
+	var s string
+	if err := json.Unmarshal(a.Raw, &s); err == nil {
+		return s
+	}
+	return ""
+}
+
+// NewAskForApprovalString constructs a bare-string variant.
+func NewAskForApprovalString(s string) AskForApproval {
+	b, _ := json.Marshal(s)
+	return AskForApproval{Raw: b}
+}
 
 // SandboxMode is the legacy thread-level sandbox shorthand.
 // Values: "read-only", "workspace-write", "danger-full-access".
