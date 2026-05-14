@@ -234,6 +234,16 @@ func (c *rpcConn) Respond(id json.RawMessage, result any) error {
 	return c.writeFrame(frame)
 }
 
+// RespondRaw sends a successful response whose result is pre-encoded JSON.
+// Used by approval routing where the decision shape is opaque to rpcConn.
+func (c *rpcConn) RespondRaw(id json.RawMessage, result json.RawMessage) error {
+	frame := struct {
+		ID     json.RawMessage `json:"id"`
+		Result json.RawMessage `json:"result"`
+	}{ID: id, Result: result}
+	return c.writeFrame(frame)
+}
+
 // RespondError sends an error response to an inbound server-initiated request.
 func (c *rpcConn) RespondError(id json.RawMessage, code int, message string) error {
 	frame := struct {

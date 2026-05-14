@@ -25,8 +25,8 @@ type options struct {
 	ephemeral     *bool
 
 	// turn defaults
-	effort     string
-	turnExtra  map[string]any
+	effort    string
+	turnExtra map[string]any
 
 	// execution
 	workDir string
@@ -38,6 +38,9 @@ type options struct {
 	// notification opt-outs forwarded to the server
 	optOutMethods []string
 	experimental  bool
+
+	// approval routing
+	approvalFunc ApprovalFunc
 }
 
 // ClientOption configures the Client itself (not individual Run calls).
@@ -163,6 +166,21 @@ func WithEnv(env map[string]string) Option {
 // stderr (codex logs at LOG_FORMAT=json or RUST_LOG-controlled text).
 func WithStderrCallback(fn func(string)) Option {
 	return func(o *options) { o.stderrCallback = fn }
+}
+
+// WithApprovalHandler registers a callback that responds to server-initiated
+// approval requests. If unset, every approval auto-declines so codex falls
+// back to skipping the proposed action — the safe default for headless use.
+//
+// The callback receives a typed ApprovalRequest; type-switch to handle the
+// specific kind (command execution, file change, permissions, legacy). Return
+// any ApprovalDecision (Accept, Decline, Cancel, PermissionGrant, etc.).
+//
+// Errors returned from the callback are surfaced as a JSON-RPC error
+// response back to the server, which the agent typically renders as a
+// tool failure. Returning a nil decision is treated as Decline.
+func WithApprovalHandler(fn ApprovalFunc) Option {
+	return func(o *options) { o.approvalFunc = fn }
 }
 
 func resolveOptions(defaults []Option, overrides []Option) *options {

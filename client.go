@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/allbin/codexcli-go/schema"
@@ -110,13 +111,13 @@ func (c *Client) Connect(ctx context.Context, opts ...Option) (*Conn, error) {
 	conn.stderrDone = make(chan struct{})
 	go conn.drainStderr()
 
-	// wait reaper
+	// wait reaper: classifies exit, stores typed error, broadcasts a
+	// terminal ProcessExitEvent to every subscriber, then closes their
+	// channels so consumers reading from sub channels see the exit
+	// before EOF. The rpc connection is closed last to keep stderr tail
+	// capture and subscriber notification ordered.
 	conn.waitDone = make(chan struct{})
-	go func() {
-		conn.waitErr = proc.Wait()
-		close(conn.waitDone)
-		conn.rpc.Close()
-	}()
+	go conn.reapProcess()
 
 	if err := conn.handshake(ctx); err != nil {
 		conn.Close()
@@ -200,36 +201,107 @@ type Conn struct {
 	subsMu sync.Mutex
 	subs   map[string]chan Event // keyed by thread id
 
-	stderrDone chan struct{}
-	waitDone   chan struct{}
-	waitErr    error
+	threadsMu sync.Mutex
+	threads   map[string]*Thread
 
-	initOnce  sync.Once
-	closeOnce sync.Once
+	stderrDone chan struct{}
+	stderrBuf  stderrRing
+
+	waitDone chan struct{}
+	waitErr  error
+	exitErr  atomic.Pointer[ProcessExitError]
+
+	initOnce      sync.Once
+	closeOnce     sync.Once
+	closeSubsOnce sync.Once
 }
 
 // Close terminates the underlying process and releases resources.
+//
+// Close is idempotent; multiple callers and goroutines can invoke it
+// safely. The call blocks until either the reaper has finished (and
+// therefore subscribers have all been closed cleanly) or the 5-second
+// safety timeout expires.
 func (c *Conn) Close() error {
 	c.closeOnce.Do(func() {
 		c.cancel()
 		if c.proc.Stdin != nil {
 			_ = c.proc.Stdin.Close()
 		}
-		// Give the process a beat to exit cleanly before the context
-		// kill takes effect.
+		c.rpc.Close()
+		// Wait for the reaper to finish; that guarantees the read
+		// loop has exited and the subscriber channels are closed.
+		// The 5s timeout is a backstop against a stuck subprocess —
+		// in that case we leak the reaper goroutine, but we don't
+		// race the read loop against subscriber teardown.
 		select {
 		case <-c.waitDone:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
+			c.logger.Warn("codexcli: Close timed out waiting for reaper; leaving subs open")
 		}
-		c.rpc.Close()
+	})
+	return nil
+}
+
+// ExitError returns the typed exit error once the subprocess has died,
+// or nil while still running. Callers can poll this from any goroutine.
+func (c *Conn) ExitError() *ProcessExitError {
+	return c.exitErr.Load()
+}
+
+// reapProcess runs in its own goroutine for the life of the Conn. It
+// blocks on proc.Wait, classifies the exit, stores it on the Conn,
+// emits a ProcessExitEvent to every active subscriber, then closes
+// every subscription channel so consumers iterating the events channel
+// see a clean shutdown sequence even when the process dies mid-turn.
+func (c *Conn) reapProcess() {
+	c.waitErr = c.proc.Wait()
+
+	// Wait for stderr drain to finish so the captured tail reflects
+	// everything the subprocess printed before terminating. drainStderr
+	// closes c.stderrDone when it sees EOF.
+	select {
+	case <-c.stderrDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	exit := classifyExit(c.waitErr, c.ctx.Err(), c.stderrBuf.String())
+	c.exitErr.Store(exit)
+
+	// Wake up anyone blocked on rpc.Request — closing rpc fails their
+	// pending response channels. Done before subscriber teardown so a
+	// turn goroutine that races with reap sees the typed error rather
+	// than hanging on a future read.
+	c.rpc.Close()
+
+	// Wait for the rpc read loop to exit before touching subscriber
+	// channels. The read loop owns sends into sub via dispatchNotification;
+	// closing subs while it's still running races on the channel state.
+	<-c.rpc.Done()
+
+	close(c.waitDone)
+
+	// Deliver the final event then close subs. This is the contract
+	// callers rely on: the last event before sub close is the typed
+	// exit, so a `range sub` loop can promote it to a stream-level error.
+	c.deliverExitAndCloseSubs(exit)
+}
+
+func (c *Conn) deliverExitAndCloseSubs(exit *ProcessExitError) {
+	c.closeSubsOnce.Do(func() {
 		c.subsMu.Lock()
+		defer c.subsMu.Unlock()
 		for tid, ch := range c.subs {
+			if exit != nil {
+				select {
+				case ch <- &ProcessExitEvent{Err: exit}:
+				default:
+				}
+			}
 			close(ch)
 			delete(c.subs, tid)
 		}
-		c.subsMu.Unlock()
 	})
-	return nil
 }
 
 func (c *Conn) handshake(ctx context.Context) error {
@@ -262,12 +334,75 @@ func (c *Conn) handshake(ctx context.Context) error {
 // Per-call overrides are not currently exposed at this layer — set
 // thread defaults via Options on New / Connect.
 func (c *Conn) NewThread(ctx context.Context) (*Thread, error) {
+	if err := c.checkExited(); err != nil {
+		return nil, err
+	}
 	params := c.options.buildThreadStartParams()
 	var resp schema.ThreadStartResponse
 	if err := c.rpc.Request(ctx, "thread/start", params, &resp); err != nil {
-		return nil, fmt.Errorf("thread/start: %w", err)
+		return nil, c.promoteRPCError("thread/start", err)
 	}
-	return &Thread{ID: resp.Thread.ID, conn: c, response: resp}, nil
+	t := &Thread{ID: resp.Thread.ID, conn: c, response: resp}
+	c.registerThread(t)
+	return t, nil
+}
+
+// checkExited returns the typed ProcessExitError if the subprocess has
+// already terminated, or nil otherwise.
+func (c *Conn) checkExited() error {
+	if ex := c.exitErr.Load(); ex != nil {
+		return ex
+	}
+	return nil
+}
+
+// promoteRPCError replaces a generic ErrClosed with the typed exit
+// error when one is available, so callers see why the process died
+// instead of a bare "connection closed".
+func (c *Conn) promoteRPCError(op string, err error) error {
+	if errors.Is(err, ErrClosed) {
+		if ex := c.exitErr.Load(); ex != nil {
+			return fmt.Errorf("%s: %w", op, ex)
+		}
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// Interrupt cancels an in-flight turn. Pass the empty string for turnID
+// to interrupt whatever turn the server treats as active for this thread.
+//
+// The call returns once the server acknowledges with `{}`; a separate
+// `turn/completed` notification with `status: "interrupted"` arrives on
+// the event channel.
+func (c *Conn) Interrupt(ctx context.Context, threadID, turnID string) error {
+	return c.interrupt(ctx, threadID, turnID)
+}
+
+func (c *Conn) interrupt(ctx context.Context, threadID, turnID string) error {
+	if err := c.checkExited(); err != nil {
+		return err
+	}
+	params := schema.TurnInterruptParams{ThreadID: threadID, TurnID: turnID}
+	var resp schema.TurnInterruptResponse
+	if err := c.rpc.Request(ctx, "turn/interrupt", params, &resp); err != nil {
+		return c.promoteRPCError("turn/interrupt", err)
+	}
+	return nil
+}
+
+func (c *Conn) registerThread(t *Thread) {
+	c.threadsMu.Lock()
+	if c.threads == nil {
+		c.threads = map[string]*Thread{}
+	}
+	c.threads[t.ID] = t
+	c.threadsMu.Unlock()
+}
+
+func (c *Conn) lookupThread(id string) *Thread {
+	c.threadsMu.Lock()
+	defer c.threadsMu.Unlock()
+	return c.threads[id]
 }
 
 // --- subscription bookkeeping ---
@@ -322,11 +457,17 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 	case "turn/started":
 		var p schema.TurnStartedNotification
 		if err := json.Unmarshal(params, &p); err == nil {
+			if t := c.lookupThread(p.ThreadId); t != nil {
+				t.setActiveTurn(p.Turn.ID)
+			}
 			c.deliver(p.ThreadId, &TurnStartedEvent{ThreadID: p.ThreadId, Turn: p.Turn})
 		}
 	case "turn/completed":
 		var p schema.TurnCompletedNotification
 		if err := json.Unmarshal(params, &p); err == nil {
+			if t := c.lookupThread(p.ThreadId); t != nil {
+				t.setActiveTurn("")
+			}
 			c.deliver(p.ThreadId, &TurnCompletedEvent{ThreadID: p.ThreadId, Turn: p.Turn})
 		}
 	case "item/started":
@@ -375,17 +516,84 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 
 // dispatchServerRequest handles inbound JSON-RPC requests from the
 // server (approvals, permission prompts, dynamic tool calls, etc.).
-// This first pass auto-declines everything — approval/permission
-// callbacks land in a follow-up.
+//
+// Approval routing:
+//   - Approval methods (see schema.Method*Approval consts) decode into a
+//     typed ApprovalRequest and dispatch to options.approvalFunc. If no
+//     handler is registered the request auto-declines with the kind's
+//     "decline" decision so the agent's turn can proceed without the
+//     blocked action.
+//   - Unknown methods get a JSON-RPC method-not-found response. A copy
+//     of the raw payload is broadcast to every subscriber as an
+//     UnknownEvent so test fixtures and consumers can spot drift.
+//
+// Runs in its own goroutine per request so concurrent approvals don't
+// serialize the rpc read loop.
 func (c *Conn) dispatchServerRequest(method string, id json.RawMessage, params json.RawMessage) {
-	c.logger.Warn("codexcli: server request not handled in v0 — auto-declining",
-		"method", method, "params", string(params))
-	switch method {
-	case "execCommandApproval", "applyPatchApproval",
-		"item/commandExecution/requestApproval", "item/fileChange/requestApproval":
-		_ = c.rpc.Respond(id, map[string]any{"decision": "decline"})
-	default:
-		_ = c.rpc.RespondError(id, -32601, "method not implemented by codexcli-go v0")
+	go c.handleServerRequest(method, id, params)
+}
+
+func (c *Conn) handleServerRequest(method string, id json.RawMessage, params json.RawMessage) {
+	req, err := decodeApprovalRequest(method, params)
+	if err != nil {
+		c.logger.Error("codexcli: failed to decode approval params",
+			"method", method, "err", err)
+		_ = c.rpc.RespondError(id, -32602, "invalid approval params: "+err.Error())
+		return
+	}
+	if req != nil {
+		c.routeApproval(method, id, req)
+		return
+	}
+
+	// Non-approval server request — broadcast for observability and
+	// answer method-not-found. Consumers wanting to handle these should
+	// raise a feature request.
+	c.subsMu.Lock()
+	for _, ch := range c.subs {
+		select {
+		case ch <- &UnknownServerRequestEvent{Method: method, Params: params}:
+		default:
+		}
+	}
+	c.subsMu.Unlock()
+	_ = c.rpc.RespondError(id, -32601, "codexcli: server request method not implemented: "+method)
+}
+
+func (c *Conn) routeApproval(method string, id json.RawMessage, req ApprovalRequest) {
+	// Broadcast as an event so observers (UIs, tests) can see the
+	// request alongside the resulting decision.
+	if tid := req.ThreadID(); tid != "" {
+		c.deliver(tid, &ApprovalRequestEvent{Request: req})
+	}
+
+	fn := c.options.approvalFunc
+	if fn == nil {
+		fn = DenyAll
+	}
+
+	ctx, cancel := context.WithCancel(c.ctx)
+	defer cancel()
+
+	decision, err := fn(ctx, req)
+	if err != nil {
+		c.logger.Warn("codexcli: approval handler returned error",
+			"method", method, "err", err)
+		_ = c.rpc.RespondError(id, -32000, "approval handler error: "+err.Error())
+		return
+	}
+	if decision == nil {
+		decision = Decline{}
+	}
+	body, err := decision.marshalDecision(method)
+	if err != nil {
+		c.logger.Error("codexcli: approval decision marshal failed",
+			"method", method, "err", err)
+		_ = c.rpc.RespondError(id, -32000, err.Error())
+		return
+	}
+	if err := c.rpc.RespondRaw(id, body); err != nil {
+		c.logger.Warn("codexcli: failed to send approval response", "err", err)
 	}
 }
 
@@ -396,6 +604,7 @@ func (c *Conn) drainStderr() {
 		line, err := r.ReadString('\n')
 		if line != "" {
 			s := strings.TrimRight(line, "\r\n")
+			c.stderrBuf.Write(line)
 			if cb := c.options.stderrCallback; cb != nil {
 				cb(s)
 			}
@@ -409,5 +618,35 @@ func (c *Conn) drainStderr() {
 	}
 }
 
-// suppress unused import warning until exit-error wiring lands
-var _ = errors.New
+// stderrRing accumulates a bounded tail of subprocess stderr so the
+// exit classifier can attach diagnostic context to ProcessExitError.
+// 4 KiB is enough to catch a Rust panic message without unbounded
+// growth in long-lived sessions.
+type stderrRing struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (r *stderrRing) Write(s string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	const cap = 4 * 1024
+	if r.buf.Len()+len(s) <= cap {
+		r.buf.WriteString(s)
+		return
+	}
+	// Reset and re-seed with the new line; trades older context for
+	// fresher information on long runs.
+	r.buf.Reset()
+	if len(s) > cap {
+		r.buf.WriteString(s[len(s)-cap:])
+	} else {
+		r.buf.WriteString(s)
+	}
+}
+
+func (r *stderrRing) String() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.buf.String()
+}

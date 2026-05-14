@@ -130,7 +130,7 @@ type Thread struct {
 	Cwd           string          `json:"cwd"`
 	CliVersion    string          `json:"cliVersion"`
 	ModelProvider string          `json:"modelProvider"`
-	Ephemeral     bool             `json:"ephemeral"`
+	Ephemeral     bool            `json:"ephemeral"`
 	CreatedAt     int64           `json:"createdAt"`
 	UpdatedAt     int64           `json:"updatedAt"`
 	Preview       string          `json:"preview"`
@@ -205,14 +205,14 @@ const (
 // turn/completed notifications today; rely on item/* notifications for
 // the canonical incremental view.
 type Turn struct {
-	ID          string          `json:"id"`
-	Status      TurnStatus      `json:"status"`
-	Items       []ThreadItem    `json:"items"`
-	StartedAt   *int64          `json:"startedAt,omitempty"`
-	CompletedAt *int64          `json:"completedAt,omitempty"`
-	DurationMs  *int64          `json:"durationMs,omitempty"`
-	Error       *TurnError      `json:"error,omitempty"`
-	ItemsView   string          `json:"itemsView,omitempty"`
+	ID          string       `json:"id"`
+	Status      TurnStatus   `json:"status"`
+	Items       []ThreadItem `json:"items"`
+	StartedAt   *int64       `json:"startedAt,omitempty"`
+	CompletedAt *int64       `json:"completedAt,omitempty"`
+	DurationMs  *int64       `json:"durationMs,omitempty"`
+	Error       *TurnError   `json:"error,omitempty"`
+	ItemsView   string       `json:"itemsView,omitempty"`
 }
 
 // TurnError carries the failure payload on `turn.status: "failed"` and
@@ -268,10 +268,10 @@ type TurnCompletedNotification struct {
 }
 
 type ItemStartedNotification struct {
-	ThreadId     string     `json:"threadId"`
-	TurnId       string     `json:"turnId"`
-	StartedAtMs  int64      `json:"startedAtMs"`
-	Item         ThreadItem `json:"item"`
+	ThreadId    string     `json:"threadId"`
+	TurnId      string     `json:"turnId"`
+	StartedAtMs int64      `json:"startedAtMs"`
+	Item        ThreadItem `json:"item"`
 }
 
 type ItemCompletedNotification struct {

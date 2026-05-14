@@ -118,7 +118,7 @@ type StderrEvent struct {
 	Line string
 }
 
-func (*StderrEvent) event() {}
+func (*StderrEvent) event()           {}
 func (e *StderrEvent) String() string { return fmt.Sprintf("StderrEvent{%s}", e.Line) }
 
 // UnknownEvent is emitted for any server notification this SDK doesn't
@@ -132,4 +132,32 @@ type UnknownEvent struct {
 func (*UnknownEvent) event() {}
 func (e *UnknownEvent) String() string {
 	return fmt.Sprintf("UnknownEvent{Method: %s, len: %d}", e.Method, len(e.Params))
+}
+
+// ApprovalRequestEvent surfaces an inbound approval request to stream
+// consumers in parallel with the configured ApprovalFunc. Useful for UIs
+// that want to render a pending-approval indicator while the callback
+// computes a decision.
+type ApprovalRequestEvent struct {
+	Request ApprovalRequest
+}
+
+func (*ApprovalRequestEvent) event() {}
+func (e *ApprovalRequestEvent) String() string {
+	return fmt.Sprintf("ApprovalRequestEvent{Method: %s, Thread: %s, Turn: %s}",
+		e.Request.Method(), e.Request.ThreadID(), e.Request.TurnID())
+}
+
+// UnknownServerRequestEvent surfaces a server-initiated JSON-RPC request
+// that this SDK does not handle natively. The dispatcher always responds
+// with a method-not-found error to keep the protocol moving; this event
+// exists so consumers can log/observe drift.
+type UnknownServerRequestEvent struct {
+	Method string
+	Params json.RawMessage
+}
+
+func (*UnknownServerRequestEvent) event() {}
+func (e *UnknownServerRequestEvent) String() string {
+	return fmt.Sprintf("UnknownServerRequestEvent{Method: %s, len: %d}", e.Method, len(e.Params))
 }
