@@ -2,7 +2,6 @@ package codexcli
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 )
@@ -140,6 +139,3 @@ func runHappyPathServer(t *testing.T, fix *BidiFixtureExecutor) {
 		}
 	}()
 }
-
-// stable marker so json import is exercised even if test list reshuffles.
-var _ = json.RawMessage("{}")

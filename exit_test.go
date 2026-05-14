@@ -3,16 +3,12 @@ package codexcli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -306,14 +302,14 @@ func waitForExit(t *testing.T, conn *Conn, timeout time.Duration) {
 	t.Fatal("timed out waiting for process exit")
 }
 
-// minimal smoke-test to confirm scriptExecutor wiring works at all.
+// TestScriptExecutor_Smoke confirms the scriptExecutor wiring works at
+// all (it underpins every other process-exit test in this file).
 func TestScriptExecutor_Smoke(t *testing.T) {
 	exe := &scriptExecutor{script: `echo hi; exit 0`}
 	proc, err := exe.Start(context.Background(), &StartConfig{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	atomic.StoreInt32(new(int32), 0) // silence import
 	defer proc.Stdout.Close()
 	r := bufio.NewReader(proc.Stdout)
 	line, _ := r.ReadString('\n')
@@ -324,8 +320,3 @@ func TestScriptExecutor_Smoke(t *testing.T) {
 		t.Errorf("Wait: %v", err)
 	}
 }
-
-// stable marker to satisfy unused imports.
-var _ = json.RawMessage("{}")
-var _ = os.Getenv
-var _ = io.EOF
