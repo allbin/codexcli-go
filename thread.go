@@ -1,0 +1,98 @@
+package codexcli
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/allbin/codexcli-go/schema"
+)
+
+// Thread is a started codex thread. Hold a Thread to dispatch multiple
+// turns on the same conversation.
+type Thread struct {
+	ID       string
+	conn     *Conn
+	response schema.ThreadStartResponse
+}
+
+// Response returns the server's thread/start payload (model resolution,
+// approval policy, instruction sources, sandbox details).
+func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
+
+// StartTurn dispatches turn/start with the given prompt and returns a
+// stream of typed events scoped to this turn. The stream ends with
+// TurnCompletedEvent (or ErrorEvent on transport/protocol failure).
+//
+// Multiple concurrent turns on the same thread are not supported by
+// codex app-server — call StartTurn sequentially.
+func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (*Stream, error) {
+	events := make(chan Event, 64)
+	done := make(chan struct{})
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream := newStream(events, done, cancel)
+	sub := t.conn.subscribe(t.ID)
+
+	go func() {
+		defer close(done)
+		defer close(events)
+		defer t.conn.unsubscribe(t.ID)
+
+		if _, err := t.startTurn(streamCtx, prompt, opts...); err != nil {
+			events <- &ErrorEvent{Err: fmt.Errorf("turn/start: %w", err), Fatal: true}
+			return
+		}
+		for {
+			select {
+			case ev, ok := <-sub:
+				if !ok {
+					return
+				}
+				events <- ev
+				if _, completed := ev.(*TurnCompletedEvent); completed {
+					return
+				}
+				if e, ok := ev.(*ErrorEvent); ok && e.Fatal {
+					return
+				}
+			case <-streamCtx.Done():
+				return
+			}
+		}
+	}()
+	return stream, nil
+}
+
+// startTurn is the synchronous turn/start request — returns once the
+// server acknowledges (the streamed events arrive separately).
+func (t *Thread) startTurn(ctx context.Context, prompt string, opts ...Option) (*schema.TurnStartResponse, error) {
+	resolved := resolveOptions(t.conn.options.callOpts(), opts)
+	params := resolved.buildTurnStartParams(t.ID, prompt)
+	var resp schema.TurnStartResponse
+	if err := t.conn.rpc.Request(ctx, "turn/start", params, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// callOpts returns a slice of Options that re-derive the current
+// resolved values. Used so per-call StartTurn options layer on top of
+// connection defaults.
+func (o *options) callOpts() []Option {
+	out := []Option{}
+	if o.model != "" {
+		out = append(out, WithModel(o.model))
+	}
+	if o.cwd != "" {
+		out = append(out, WithCwd(o.cwd))
+	}
+	if o.effort != "" {
+		out = append(out, WithEffort(o.effort))
+	}
+	if o.approval != nil {
+		out = append(out, WithApprovalPolicy(*o.approval))
+	}
+	if o.turnExtra != nil {
+		out = append(out, WithTurnExtra(o.turnExtra))
+	}
+	return out
+}
