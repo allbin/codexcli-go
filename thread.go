@@ -3,6 +3,7 @@ package codexcli
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/allbin/codexcli-go/schema"
 )
@@ -13,6 +14,35 @@ type Thread struct {
 	ID       string
 	conn     *Conn
 	response schema.ThreadStartResponse
+
+	mu         sync.Mutex
+	activeTurn string
+}
+
+// ActiveTurnID returns the most recently observed in-flight turn id, or
+// empty when no turn is active. Updated when turn/start returns and
+// cleared on turn/completed.
+func (t *Thread) ActiveTurnID() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.activeTurn
+}
+
+func (t *Thread) setActiveTurn(id string) {
+	t.mu.Lock()
+	t.activeTurn = id
+	t.mu.Unlock()
+}
+
+// Interrupt cancels the in-flight turn on this thread. It returns once
+// the server acknowledges the turn/interrupt request; the resulting
+// `turn/completed` notification arrives on the active Stream with
+// status: "interrupted".
+//
+// Safe to call with no active turn — the server returns success regardless.
+func (t *Thread) Interrupt(ctx context.Context) error {
+	turnID := t.ActiveTurnID()
+	return t.conn.interrupt(ctx, t.ID, turnID)
 }
 
 // Response returns the server's thread/start payload (model resolution,
@@ -65,12 +95,16 @@ func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (
 // startTurn is the synchronous turn/start request — returns once the
 // server acknowledges (the streamed events arrive separately).
 func (t *Thread) startTurn(ctx context.Context, prompt string, opts ...Option) (*schema.TurnStartResponse, error) {
+	if err := t.conn.checkExited(); err != nil {
+		return nil, err
+	}
 	resolved := resolveOptions(t.conn.options.callOpts(), opts)
 	params := resolved.buildTurnStartParams(t.ID, prompt)
 	var resp schema.TurnStartResponse
 	if err := t.conn.rpc.Request(ctx, "turn/start", params, &resp); err != nil {
-		return nil, err
+		return nil, t.conn.promoteRPCError("turn/start", err)
 	}
+	t.setActiveTurn(resp.Turn.ID)
 	return &resp, nil
 }
 
