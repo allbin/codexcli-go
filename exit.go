@@ -105,6 +105,13 @@ func truncateStderr(s string) string {
 	return s[len(s)-max:]
 }
 
+// stderrDrainGracePeriod is how long classifyExit waits for the
+// drainStderr goroutine to finish capturing the subprocess's final
+// stderr lines before snapshotting LastStderr. 1s is enough to absorb
+// pipe-flush jitter on common Linux/macOS kernels without making the
+// reaper feel sluggish.
+const stderrDrainGracePeriod = 1 * time.Second
+
 // classifyExit maps a Wait error + context state to a structured
 // ProcessExitError. Adapted from claudecli-go's classifyExit; the
 // context-cancellation branch wins because SDK-initiated kills should

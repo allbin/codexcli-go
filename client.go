@@ -262,7 +262,7 @@ func (c *Conn) reapProcess() {
 	// closes c.stderrDone when it sees EOF.
 	select {
 	case <-c.stderrDone:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(stderrDrainGracePeriod):
 	}
 
 	exit := classifyExit(c.waitErr, c.ctx.Err(), c.stderrBuf.String())
