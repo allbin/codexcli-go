@@ -44,11 +44,11 @@ type Stream struct {
 	done   <-chan struct{}
 	cancel context.CancelFunc
 
-	mu       sync.Mutex
-	state    State
+	mu        sync.Mutex
+	state     State
 	finalTurn *schema.Turn
-	err      error
-	waited   bool
+	err       error
+	waited    bool
 }
 
 func newStream(events <-chan Event, done <-chan struct{}, cancel context.CancelFunc) *Stream {
@@ -131,6 +131,16 @@ func (s *Stream) track(ev Event) {
 		}
 	case *ErrorEvent:
 		if e.Fatal {
+			s.state = StateFailed
+			if s.err == nil {
+				s.err = e.Err
+			}
+		}
+	case *ProcessExitEvent:
+		// Promote to StateFailed only on a non-clean exit. A normal exit
+		// after turn/completed is just shutdown ordering and shouldn't
+		// poison Stream.Wait() with an error.
+		if e.Err != nil && e.Err.Reason != ExitReasonNormal && e.Err.Reason != ExitReasonContextCanceled {
 			s.state = StateFailed
 			if s.err == nil {
 				s.err = e.Err
