@@ -249,6 +249,46 @@ func (c *Conn) ExitError() *ProcessExitError {
 	return c.exitErr.Load()
 }
 
+// ProcessInfo returns a lightweight liveness snapshot for watchdogs.
+func (c *Conn) ProcessInfo() ProcessInfo {
+	ex := c.exitErr.Load()
+	info := ProcessInfo{
+		Running: ex == nil,
+		Exit:    ex,
+	}
+	if c.rpc != nil {
+		info.LastStdoutAt = c.rpc.LastReadAt()
+	}
+	return info
+}
+
+// Ping checks whether the connection still appears alive. Codex app-server
+// does not currently expose a dedicated control round-trip, so this is a
+// local liveness probe rather than a protocol ping.
+func (c *Conn) Ping(ctx context.Context, timeout time.Duration) error {
+	if err := c.checkExited(); err != nil {
+		return err
+	}
+	if timeout <= 0 {
+		timeout = 1 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.ctx.Done():
+		if err := c.checkExited(); err != nil {
+			return err
+		}
+		return ErrClosed
+	case <-timer.C:
+		return c.checkExited()
+	default:
+		return nil
+	}
+}
+
 // reapProcess runs in its own goroutine for the life of the Conn. It
 // blocks on proc.Wait, classifies the exit, stores it on the Conn,
 // emits a ProcessExitEvent to every active subscriber, then closes
@@ -547,8 +587,7 @@ func (c *Conn) handleServerRequest(method string, id json.RawMessage, params jso
 	}
 
 	// Non-approval server request — broadcast for observability and
-	// answer method-not-found. Consumers wanting to handle these should
-	// raise a feature request.
+	// answer via the generic handler when configured.
 	c.subsMu.Lock()
 	for _, ch := range c.subs {
 		select {
@@ -557,6 +596,21 @@ func (c *Conn) handleServerRequest(method string, id json.RawMessage, params jso
 		}
 	}
 	c.subsMu.Unlock()
+
+	if fn := c.options.serverRequestFunc; fn != nil {
+		ctx, cancel := context.WithCancel(c.ctx)
+		defer cancel()
+		result, err := fn(ctx, ServerRequest{Method: method, Params: params})
+		if err != nil {
+			_ = c.rpc.RespondError(id, -32000, "server request handler error: "+err.Error())
+			return
+		}
+		if len(result) == 0 {
+			result = json.RawMessage(`{}`)
+		}
+		_ = c.rpc.RespondRaw(id, result)
+		return
+	}
 	_ = c.rpc.RespondError(id, -32601, "codexcli: server request method not implemented: "+method)
 }
 

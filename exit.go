@@ -97,6 +97,15 @@ func (e *ProcessExitEvent) String() string {
 	return fmt.Sprintf("ProcessExitEvent{%s}", e.Err.Error())
 }
 
+// ProcessInfo is a lightweight snapshot for watchdogs. LastStdoutAt tracks
+// the last JSON-RPC frame read from codex stdout; Running is false once the
+// subprocess exit has been classified.
+type ProcessInfo struct {
+	LastStdoutAt time.Time
+	Running      bool
+	Exit         *ProcessExitError
+}
+
 func truncateStderr(s string) string {
 	const max = 240
 	if len(s) <= max {

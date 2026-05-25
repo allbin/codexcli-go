@@ -40,7 +40,8 @@ type options struct {
 	experimental  bool
 
 	// approval routing
-	approvalFunc ApprovalFunc
+	approvalFunc      ApprovalFunc
+	serverRequestFunc ServerRequestFunc
 }
 
 // ClientOption configures the Client itself (not individual Run calls).
@@ -183,6 +184,16 @@ func WithApprovalHandler(fn ApprovalFunc) Option {
 	return func(o *options) { o.approvalFunc = fn }
 }
 
+// WithServerRequestHandler registers a callback for non-approval
+// server-initiated JSON-RPC requests, such as request_user_input or MCP
+// elicitation. The callback must return the full JSON-RPC result body.
+//
+// Approval requests are still handled by WithApprovalHandler and never reach
+// this callback. If unset, unknown server requests receive method-not-found.
+func WithServerRequestHandler(fn ServerRequestFunc) Option {
+	return func(o *options) { o.serverRequestFunc = fn }
+}
+
 func resolveOptions(defaults []Option, overrides []Option) *options {
 	opts := &options{
 		clientInfo: schema.ClientInfo{Name: DefaultClientName, Version: SDKVersion},
@@ -224,10 +235,13 @@ func (o *options) buildThreadStartParams() schema.ThreadStartParams {
 	return p
 }
 
-func (o *options) buildTurnStartParams(threadID, prompt string) schema.TurnStartParams {
+func (o *options) buildTurnStartParams(threadID string, input []schema.UserInput) schema.TurnStartParams {
+	if len(input) == 0 {
+		input = []schema.UserInput{schema.TextInput("")}
+	}
 	p := schema.TurnStartParams{
 		ThreadId: threadID,
-		Input:    []schema.UserInput{schema.TextInput(prompt)},
+		Input:    input,
 		Extra:    o.turnExtra,
 	}
 	if o.model != "" {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // rpcMessage is the on-wire shape of every JSON-RPC frame the codex
@@ -73,6 +74,7 @@ type rpcConn struct {
 	closeOnce sync.Once
 	closed    atomic.Bool
 	readErr   atomic.Value // error
+	lastRead  atomic.Int64 // unix nanos of most recent stdout frame
 	doneCh    chan struct{}
 }
 
@@ -110,6 +112,7 @@ func (c *rpcConn) readLoop() {
 	for {
 		line, err := c.r.ReadBytes('\n')
 		if len(line) > 0 {
+			c.lastRead.Store(time.Now().UnixNano())
 			c.dispatch(line)
 		}
 		if err != nil {
@@ -279,4 +282,14 @@ func (c *rpcConn) ReadErr() error {
 		return v.(error)
 	}
 	return nil
+}
+
+// LastReadAt returns when the transport last received a stdout JSON-RPC
+// frame. The zero value means no frame has been read yet.
+func (c *rpcConn) LastReadAt() time.Time {
+	n := c.lastRead.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
 }

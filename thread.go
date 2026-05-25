@@ -56,6 +56,13 @@ func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
 // Multiple concurrent turns on the same thread are not supported by
 // codex app-server — call StartTurn sequentially.
 func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (*Stream, error) {
+	return t.StartTurnInput(ctx, []schema.UserInput{schema.TextInput(prompt)}, opts...)
+}
+
+// StartTurnInput dispatches turn/start with typed user input blocks and
+// returns a stream of typed events scoped to this turn. Use this for image,
+// local-image, skill, and mention inputs without relying on raw turn extras.
+func (t *Thread) StartTurnInput(ctx context.Context, input []schema.UserInput, opts ...Option) (*Stream, error) {
 	events := make(chan Event, 64)
 	done := make(chan struct{})
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -67,7 +74,7 @@ func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (
 		defer close(events)
 		defer t.conn.unsubscribe(t.ID)
 
-		if _, err := t.startTurn(streamCtx, prompt, opts...); err != nil {
+		if _, err := t.startTurnInput(streamCtx, input, opts...); err != nil {
 			events <- &ErrorEvent{Err: fmt.Errorf("turn/start: %w", err), Fatal: true}
 			return
 		}
@@ -95,11 +102,15 @@ func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (
 // startTurn is the synchronous turn/start request — returns once the
 // server acknowledges (the streamed events arrive separately).
 func (t *Thread) startTurn(ctx context.Context, prompt string, opts ...Option) (*schema.TurnStartResponse, error) {
+	return t.startTurnInput(ctx, []schema.UserInput{schema.TextInput(prompt)}, opts...)
+}
+
+func (t *Thread) startTurnInput(ctx context.Context, input []schema.UserInput, opts ...Option) (*schema.TurnStartResponse, error) {
 	if err := t.conn.checkExited(); err != nil {
 		return nil, err
 	}
 	resolved := resolveOptions(t.conn.options.callOpts(), opts)
-	params := resolved.buildTurnStartParams(t.ID, prompt)
+	params := resolved.buildTurnStartParams(t.ID, input)
 	var resp schema.TurnStartResponse
 	if err := t.conn.rpc.Request(ctx, "turn/start", params, &resp); err != nil {
 		return nil, t.conn.promoteRPCError("turn/start", err)

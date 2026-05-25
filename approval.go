@@ -268,6 +268,19 @@ func DenyAll(_ context.Context, _ ApprovalRequest) (ApprovalDecision, error) {
 	return Decline{}, nil
 }
 
+// ServerRequest is a non-approval JSON-RPC request initiated by the server.
+// Params preserves the raw request payload so consumers can decode provider
+// additions without waiting for typed support in this package.
+type ServerRequest struct {
+	Method string
+	Params json.RawMessage
+}
+
+// ServerRequestFunc handles non-approval server requests. Return value is the
+// raw JSON result body sent back to the server. Returning an error sends a
+// JSON-RPC error response.
+type ServerRequestFunc func(ctx context.Context, req ServerRequest) (json.RawMessage, error)
+
 func decisionJSON(value string) (json.RawMessage, error) {
 	return json.Marshal(map[string]string{"decision": value})
 }
@@ -311,13 +324,4 @@ func decodeApprovalRequest(method string, params json.RawMessage) (ApprovalReque
 	default:
 		return nil, nil
 	}
-}
-
-// UnknownServerRequest carries a server-initiated JSON-RPC request that
-// the dispatcher does not understand. Hand back a typed event so the
-// stream consumer can decide how to respond — by default the dispatcher
-// emits a method-not-found error response.
-type UnknownServerRequest struct {
-	Method string
-	Params json.RawMessage
 }
