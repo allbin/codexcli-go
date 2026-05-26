@@ -226,19 +226,59 @@ type TurnError struct {
 
 // ThreadItem is the union carried in turn responses and item/*
 // notifications. Type discriminates ("userMessage", "agentMessage",
-// "commandExecution", "fileChange", "mcpToolCall", etc.). Only the
-// "agentMessage" shape is broken out today — everything else stays as
-// Raw and consumers can drill in by type.
+// "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
+// "reasoning", "plan", etc.).
+//
+// Common fields are promoted; type-specific fields live in typed
+// sub-structs that consumers can reach via CommandExecution(),
+// FileChange(), McpToolCall(), DynamicToolCall(), or Reasoning().
+// Raw preserves the full JSON for forward compatibility.
 type ThreadItem struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 
-	// AgentMessage-specific fields. Populated when Type == "agentMessage".
-	Text string `json:"text,omitempty"`
+	// AgentMessage / Plan fields.
+	Text  string  `json:"text,omitempty"`
+	Phase *string `json:"phase,omitempty"`
+
+	// CommandExecution fields.
+	Command          *string         `json:"command,omitempty"`
+	Cwd              *string         `json:"cwd,omitempty"`
+	ExitCode         *int            `json:"exitCode,omitempty"`
+	AggregatedOutput *string         `json:"aggregatedOutput,omitempty"`
+	Source           *string         `json:"source,omitempty"`
+	CommandActions   json.RawMessage `json:"commandActions,omitempty"`
+
+	// FileChange fields.
+	Changes json.RawMessage `json:"changes,omitempty"`
+
+	// McpToolCall fields.
+	Tool      *string         `json:"tool,omitempty"`
+	Server    *string         `json:"server,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	McpResult json.RawMessage `json:"result,omitempty"`
+	McpError  json.RawMessage `json:"error,omitempty"`
+	Namespace *string         `json:"namespace,omitempty"`
+
+	// Shared fields across tool-like items.
+	Status     *string `json:"status,omitempty"`
+	DurationMs *int64  `json:"durationMs,omitempty"`
 
 	// Raw preserves the full JSON for future-typing and forward compat.
 	Raw json.RawMessage `json:"-"`
 }
+
+// ThreadItemType constants for the known item type discriminators.
+const (
+	ItemTypeUserMessage      = "userMessage"
+	ItemTypeAgentMessage     = "agentMessage"
+	ItemTypePlan             = "plan"
+	ItemTypeReasoning        = "reasoning"
+	ItemTypeCommandExecution = "commandExecution"
+	ItemTypeFileChange       = "fileChange"
+	ItemTypeMcpToolCall      = "mcpToolCall"
+	ItemTypeDynamicToolCall  = "dynamicToolCall"
+)
 
 // UnmarshalJSON keeps both the typed projection and the raw bytes.
 func (t *ThreadItem) UnmarshalJSON(data []byte) error {
@@ -250,6 +290,24 @@ func (t *ThreadItem) UnmarshalJSON(data []byte) error {
 	*t = ThreadItem(a)
 	t.Raw = append(t.Raw[:0], data...)
 	return nil
+}
+
+// FileUpdateChange is a single entry in a fileChange item's changes array.
+type FileUpdateChange struct {
+	Path string          `json:"path"`
+	Diff string          `json:"diff"`
+	Kind json.RawMessage `json:"kind"`
+}
+
+// FileChanges parses the changes array when Type == "fileChange".
+// Returns nil for non-fileChange items or on parse error.
+func (t *ThreadItem) FileChanges() []FileUpdateChange {
+	if len(t.Changes) == 0 {
+		return nil
+	}
+	var out []FileUpdateChange
+	_ = json.Unmarshal(t.Changes, &out)
+	return out
 }
 
 // TokenUsageBreakdown holds per-turn or aggregate token counts.
