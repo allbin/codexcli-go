@@ -663,16 +663,7 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 			c.deliver(threadID, &ErrorEvent{Err: wrapTurnError(&p.Error), Fatal: false})
 		}
 	default:
-		// Broadcast unknown events to every subscriber so consumers
-		// have a chance to log them. Cheap — there are usually 1-2.
-		c.subsMu.Lock()
-		for _, ch := range c.subs {
-			select {
-			case ch <- &UnknownEvent{Method: method, Params: params}:
-			default:
-			}
-		}
-		c.subsMu.Unlock()
+		c.broadcastEvent(&UnknownEvent{Method: method, Params: params})
 	}
 }
 
@@ -719,14 +710,7 @@ func (c *Conn) handleServerRequest(method string, id json.RawMessage, params jso
 
 	// Non-approval server request — broadcast for observability and
 	// answer via the generic handler when configured.
-	c.subsMu.Lock()
-	for _, ch := range c.subs {
-		select {
-		case ch <- &UnknownServerRequestEvent{Method: method, Params: params}:
-		default:
-		}
-	}
-	c.subsMu.Unlock()
+	c.broadcastEvent(&UnknownServerRequestEvent{Method: method, Params: params})
 
 	if fn := c.options.serverRequestFunc; fn != nil {
 		ctx, cancel := context.WithCancel(c.ctx)
