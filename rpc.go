@@ -31,6 +31,7 @@ type rpcError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data,omitempty"`
+	cause   error           // original error, not serialized
 }
 
 func (e *rpcError) Error() string {
@@ -39,6 +40,8 @@ func (e *rpcError) Error() string {
 	}
 	return fmt.Sprintf("codex rpc error %d: %s", e.Code, e.Message)
 }
+
+func (e *rpcError) Unwrap() error { return e.cause }
 
 // pendingResponse holds the channel a caller is blocked on waiting for
 // a server response keyed by request id.
@@ -169,7 +172,7 @@ func (c *rpcConn) failPending(err error) {
 	c.pending.Range(func(k, v any) bool {
 		p := v.(*pendingResponse)
 		select {
-		case p.resultCh <- rpcMessage{Error: &rpcError{Code: -32000, Message: err.Error()}}:
+		case p.resultCh <- rpcMessage{Error: &rpcError{Code: -32000, Message: err.Error(), cause: err}}:
 		default:
 		}
 		c.pending.Delete(k)

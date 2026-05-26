@@ -223,24 +223,25 @@ type Conn struct {
 // therefore subscribers have all been closed cleanly) or the 5-second
 // safety timeout expires.
 func (c *Conn) Close() error {
+	var closeErr error
 	c.closeOnce.Do(func() {
+		var errs []error
 		c.cancel()
 		if c.proc.Stdin != nil {
-			_ = c.proc.Stdin.Close()
+			if err := c.proc.Stdin.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close stdin: %w", err))
+			}
 		}
 		c.rpc.Close()
-		// Wait for the reaper to finish; that guarantees the read
-		// loop has exited and the subscriber channels are closed.
-		// The 5s timeout is a backstop against a stuck subprocess —
-		// in that case we leak the reaper goroutine, but we don't
-		// race the read loop against subscriber teardown.
 		select {
 		case <-c.waitDone:
 		case <-time.After(5 * time.Second):
 			c.logger.Warn("codexcli: Close timed out waiting for reaper; leaving subs open")
+			errs = append(errs, fmt.Errorf("codexcli: close timed out waiting for reaper"))
 		}
+		closeErr = errors.Join(errs...)
 	})
-	return nil
+	return closeErr
 }
 
 // ExitError returns the typed exit error once the subprocess has died,
@@ -695,6 +696,15 @@ func (c *Conn) dispatchServerRequest(method string, id json.RawMessage, params j
 }
 
 func (c *Conn) handleServerRequest(method string, id json.RawMessage, params json.RawMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("codexcli: server request handler panicked: %v", r)
+			c.logger.Error("codexcli: panic in server request handler", "method", method, "err", err)
+			c.broadcastEvent(&ErrorEvent{Err: err, Fatal: false})
+			_ = c.rpc.RespondError(id, -32000, err.Error())
+		}
+	}()
+
 	req, err := decodeApprovalRequest(method, params)
 	if err != nil {
 		c.logger.Error("codexcli: failed to decode approval params",
@@ -736,8 +746,17 @@ func (c *Conn) handleServerRequest(method string, id json.RawMessage, params jso
 }
 
 func (c *Conn) routeApproval(method string, id json.RawMessage, req ApprovalRequest) {
-	// Broadcast as an event so observers (UIs, tests) can see the
-	// request alongside the resulting decision.
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("codexcli: approval handler panicked: %v", r)
+			c.logger.Error("codexcli: panic in approval handler", "method", method, "err", err)
+			if tid := req.ThreadID(); tid != "" {
+				c.deliver(tid, &ErrorEvent{Err: err, Fatal: false})
+			}
+			_ = c.rpc.RespondError(id, -32000, err.Error())
+		}
+	}()
+
 	if tid := req.ThreadID(); tid != "" {
 		c.deliver(tid, &ApprovalRequestEvent{Request: req})
 	}
