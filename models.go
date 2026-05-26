@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/allbin/codexcli-go/schema"
 )
 
 // ErrModelsCacheUnavailable indicates the codex models cache file does
@@ -159,6 +161,24 @@ func readModelsCache(codexHomeOverride string) ([]ModelInfo, error) {
 		return []ModelInfo{}, nil
 	}
 	return cache.Models, nil
+}
+
+// ListModels queries the running app-server for the live model registry via
+// the `model/list` RPC. Unlike the package-level ListModels (which reads
+// the on-disk cache), this reflects model availability changes that have
+// occurred since the codex process started.
+//
+// The response contains raw model objects; callers can unmarshal individual
+// entries into ModelInfo for the same typed access as the file-based version.
+func (c *Conn) ListModels(ctx context.Context) ([]json.RawMessage, error) {
+	if err := c.checkExited(); err != nil {
+		return nil, err
+	}
+	var resp schema.ModelListResponse
+	if err := c.rpc.Request(ctx, "model/list", schema.ModelListParams{}, &resp); err != nil {
+		return nil, c.promoteRPCError("model/list", err)
+	}
+	return resp.Models, nil
 }
 
 func resolveCodexHome(override string) (string, error) {
