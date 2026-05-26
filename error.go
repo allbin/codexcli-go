@@ -15,6 +15,9 @@ var (
 	ErrAlreadyInitialized = errors.New("codexcli: already initialized")
 	// ErrTurnFailed wraps a turn that ended with status: failed.
 	ErrTurnFailed = errors.New("codexcli: turn failed")
+	// ErrThreadNotFound is returned by ResumeThread when the server
+	// cannot locate the requested thread (deleted, never existed, etc.).
+	ErrThreadNotFound = errors.New("codexcli: thread not found")
 )
 
 // ExitError carries a non-zero process exit and any captured stderr.

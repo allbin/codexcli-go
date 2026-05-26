@@ -387,6 +387,52 @@ func (c *Conn) NewThread(ctx context.Context) (*Thread, error) {
 	return t, nil
 }
 
+// ResumeThread issues a thread/resume request to rehydrate a previously
+// persisted thread. On success the returned Thread is ready for
+// StartTurn; the server reloads the conversation history from disk.
+//
+// Returns ErrThreadNotFound when the server reports the thread doesn't
+// exist (deleted, wrong id, etc.), so callers can fall back to NewThread.
+func (c *Conn) ResumeThread(ctx context.Context, threadID string, opts ...Option) (*Thread, error) {
+	if err := c.checkExited(); err != nil {
+		return nil, err
+	}
+	resolved := resolveOptions(c.options.callOpts(), opts)
+	params := resolved.buildThreadResumeParams(threadID)
+	var resp schema.ThreadResumeResponse
+	if err := c.rpc.Request(ctx, "thread/resume", params, &resp); err != nil {
+		if isThreadNotFoundError(err) {
+			return nil, fmt.Errorf("thread/resume %s: %w", threadID, ErrThreadNotFound)
+		}
+		return nil, c.promoteRPCError("thread/resume", err)
+	}
+	t := &Thread{ID: resp.Thread.ID, conn: c, response: resp}
+	c.registerThread(t)
+	return t, nil
+}
+
+// isThreadNotFoundError checks if an RPC error indicates the thread
+// couldn't be found, matching the known server error message patterns.
+func isThreadNotFoundError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"not found", "missing thread", "no such thread",
+		"unknown thread", "does not exist",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResumeCursor carries the minimum state needed to resume a thread in a
+// future session. Consumers should persist this value and pass it to
+// ResumeThread.
+type ResumeCursor struct {
+	ThreadID string `json:"threadId"`
+}
+
 // checkExited returns the typed ProcessExitError if the subprocess has
 // already terminated, or nil otherwise.
 func (c *Conn) checkExited() error {

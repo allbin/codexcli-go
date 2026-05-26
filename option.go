@@ -243,6 +243,28 @@ func (o *options) buildThreadStartParams() schema.ThreadStartParams {
 	return p
 }
 
+func (o *options) buildThreadResumeParams(threadID string) schema.ThreadResumeParams {
+	p := schema.ThreadResumeParams{
+		ThreadId:       threadID,
+		ApprovalPolicy: o.approval,
+		Sandbox:        o.sandbox,
+		Extra:          o.threadExtra,
+	}
+	if o.cwd != "" {
+		v := o.cwd
+		p.Cwd = &v
+	}
+	if o.model != "" {
+		v := o.model
+		p.Model = &v
+	}
+	if o.modelProvider != "" {
+		v := o.modelProvider
+		p.ModelProvider = &v
+	}
+	return p
+}
+
 func (o *options) buildTurnStartParams(threadID string, input []schema.UserInput) schema.TurnStartParams {
 	if len(input) == 0 {
 		input = []schema.UserInput{schema.TextInput("")}
