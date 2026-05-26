@@ -2,13 +2,9 @@
 // DIR` to refresh the raw JSON Schema bundle used by the schema package.
 //
 // Invoke via `go generate ./...` after upgrading the installed codex
-// CLI. The output directory is committed to the repo so downstream
-// consumers don't need codex on their build machines.
-//
-// A second-pass version of this tool will derive Go types from the JSON
-// schemas (atombender/go-jsonschema or hand-rolled). For now it just
-// captures the raw bundle so we can diff against the schema_v2/ tree we
-// hand-rolled in schema/types.go.
+// CLI. Diff the refreshed output against schema/types.go to spot new
+// fields, methods, or enum variants that need hand-written type updates.
+// See README.md "Updating the protocol" for the full process.
 package main
 
 import (
