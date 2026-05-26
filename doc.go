@@ -16,6 +16,10 @@
 // stream typed events until `turn/completed`. For finer-grained control,
 // use Client.NewThread followed by Thread.Run on a long-lived thread.
 //
+// Inventory: ListModels reads the codex CLI's on-disk model cache
+// ($CODEX_HOME/models_cache.json) and returns a typed slice. UI callers
+// driving a picker should filter for ModelInfo.Visibility == VisibilityList.
+//
 // This first pass intentionally omits approvals, MCP elicitation,
 // fork/resume, dynamic tools, and the file/exec/account surfaces. Those
 // land incrementally as consumer needs surface.

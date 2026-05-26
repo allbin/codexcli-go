@@ -41,6 +41,28 @@ A runnable demo lives at `cmd/codexdemo`:
 go run ./cmd/codexdemo -prompt "Reply with 'Hello from codex.' and stop."
 ```
 
+## Listing available models
+
+`ListModels` returns the model registry codex CLI caches on disk at `$CODEX_HOME/models_cache.json` (codex refreshes it from OpenAI's API on each launch). It's a pure file read — no subprocess, no network — so it's safe to call from a UI thread or a CLI flag handler.
+
+```go
+models, err := codexcli.ListModels(ctx)
+if errors.Is(err, codexcli.ErrModelsCacheUnavailable) {
+    // No cache yet — fall back to a built-in default list.
+}
+if err != nil {
+    log.Fatal(err)
+}
+for _, m := range models {
+    if m.Visibility != codexcli.VisibilityList {
+        continue // codex flagged this model as hidden from pickers
+    }
+    fmt.Printf("%-20s %s\n", m.Slug, m.DisplayName)
+}
+```
+
+Resolution order for the cache directory: `WithCodexHome(...)` option → `$CODEX_HOME` env var → `$HOME/.codex`. Filtering by `Visibility` is the caller's choice; `ListModels` returns every entry in file order so non-UI callers (e.g. validating a slug against the full registry) can see hidden models too.
+
 ## Architecture
 
 | File | Role |

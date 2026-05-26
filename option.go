@@ -12,6 +12,7 @@ type Option func(*options)
 type options struct {
 	// client-only
 	binaryPath string
+	codexHome  string
 	clientInfo schema.ClientInfo
 	caps       *schema.InitializeCapabilities
 
@@ -51,6 +52,13 @@ type ClientOption func(*Client)
 // passed to New (ignored at call time). Defaults to "codex".
 func WithBinaryPath(path string) Option {
 	return func(o *options) { o.binaryPath = path }
+}
+
+// WithCodexHome overrides the codex home directory used by ListModels
+// when locating the on-disk models cache. Takes precedence over the
+// CODEX_HOME environment variable and the $HOME/.codex fallback.
+func WithCodexHome(dir string) Option {
+	return func(o *options) { o.codexHome = dir }
 }
 
 // WithClientInfo overrides the clientInfo sent during `initialize`.
