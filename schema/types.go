@@ -205,14 +205,15 @@ const (
 // turn/completed notifications today; rely on item/* notifications for
 // the canonical incremental view.
 type Turn struct {
-	ID          string       `json:"id"`
-	Status      TurnStatus   `json:"status"`
-	Items       []ThreadItem `json:"items"`
-	StartedAt   *int64       `json:"startedAt,omitempty"`
-	CompletedAt *int64       `json:"completedAt,omitempty"`
-	DurationMs  *int64       `json:"durationMs,omitempty"`
-	Error       *TurnError   `json:"error,omitempty"`
-	ItemsView   string       `json:"itemsView,omitempty"`
+	ID          string            `json:"id"`
+	Status      TurnStatus        `json:"status"`
+	Items       []ThreadItem      `json:"items"`
+	Usage       *ThreadTokenUsage `json:"usage,omitempty"`
+	StartedAt   *int64            `json:"startedAt,omitempty"`
+	CompletedAt *int64            `json:"completedAt,omitempty"`
+	DurationMs  *int64            `json:"durationMs,omitempty"`
+	Error       *TurnError        `json:"error,omitempty"`
+	ItemsView   string            `json:"itemsView,omitempty"`
 }
 
 // TurnError carries the failure payload on `turn.status: "failed"` and
@@ -251,6 +252,81 @@ func (t *ThreadItem) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// TokenUsageBreakdown holds per-turn or aggregate token counts.
+type TokenUsageBreakdown struct {
+	TotalTokens           int64 `json:"totalTokens"`
+	InputTokens           int64 `json:"inputTokens"`
+	CachedInputTokens     int64 `json:"cachedInputTokens"`
+	OutputTokens          int64 `json:"outputTokens"`
+	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+}
+
+// ThreadTokenUsage is the top-level usage snapshot emitted by the server
+// on thread/tokenUsage/updated and carried in turn/completed.
+type ThreadTokenUsage struct {
+	Last               TokenUsageBreakdown `json:"last"`
+	Total              TokenUsageBreakdown `json:"total"`
+	ModelContextWindow *int64              `json:"modelContextWindow,omitempty"`
+}
+
+// RateLimitWindow describes a single rate-limit tier.
+type RateLimitWindow struct {
+	UsedPercent       int    `json:"usedPercent"`
+	ResetsAt          *int64 `json:"resetsAt,omitempty"`
+	WindowDurationMin *int64 `json:"windowDurationMins,omitempty"`
+}
+
+// CreditsSnapshot carries the user's credit balance state.
+type CreditsSnapshot struct {
+	HasCredits bool    `json:"hasCredits"`
+	Unlimited  bool    `json:"unlimited"`
+	Balance    *string `json:"balance,omitempty"`
+}
+
+// RateLimitSnapshot is the aggregate rate-limit payload from
+// account/rateLimits/updated.
+type RateLimitSnapshot struct {
+	Primary              *RateLimitWindow `json:"primary,omitempty"`
+	Secondary            *RateLimitWindow `json:"secondary,omitempty"`
+	Credits              *CreditsSnapshot `json:"credits,omitempty"`
+	PlanType             *string          `json:"planType,omitempty"`
+	LimitID              *string          `json:"limitId,omitempty"`
+	LimitName            *string          `json:"limitName,omitempty"`
+	RateLimitReachedType *string          `json:"rateLimitReachedType,omitempty"`
+}
+
+// ThreadResumeParams is the `thread/resume` request payload.
+type ThreadResumeParams struct {
+	ThreadId       string          `json:"threadId"`
+	Cwd            *string         `json:"cwd,omitempty"`
+	Model          *string         `json:"model,omitempty"`
+	ModelProvider  *string         `json:"modelProvider,omitempty"`
+	ApprovalPolicy *AskForApproval `json:"approvalPolicy,omitempty"`
+	Sandbox        *SandboxMode    `json:"sandbox,omitempty"`
+	ServiceTier    *string         `json:"serviceTier,omitempty"`
+
+	Extra map[string]any `json:"-"`
+}
+
+// MarshalJSON merges Extra with typed fields.
+func (p ThreadResumeParams) MarshalJSON() ([]byte, error) {
+	return mergeMarshal(threadResumeShape(p), p.Extra)
+}
+
+type threadResumeShape ThreadResumeParams
+
+// ThreadResumeResponse is the `thread/resume` reply. It shares the same
+// shape as ThreadStartResponse.
+type ThreadResumeResponse = ThreadStartResponse
+
+// ModelListParams is the `model/list` request payload.
+type ModelListParams struct{}
+
+// ModelListResponse is the `model/list` reply.
+type ModelListResponse struct {
+	Models []json.RawMessage `json:"models"`
+}
+
 // Notification payload types — server -> client.
 
 type ThreadStartedNotification struct {
@@ -287,8 +363,78 @@ type AgentMessageDeltaNotification struct {
 	Delta    string `json:"delta"`
 }
 
+// CommandExecutionOutputDeltaNotification is the params payload of
+// `item/commandExecution/outputDelta` — streamed command stdout/stderr.
+type CommandExecutionOutputDeltaNotification struct {
+	ThreadId string `json:"threadId"`
+	TurnId   string `json:"turnId"`
+	ItemId   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
+// FileChangeOutputDeltaNotification is the params payload of
+// `item/fileChange/outputDelta` — streamed file-change progress.
+type FileChangeOutputDeltaNotification struct {
+	ThreadId string `json:"threadId"`
+	TurnId   string `json:"turnId"`
+	ItemId   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
+// ReasoningTextDeltaNotification is the params payload of
+// `item/reasoning/textDelta` — streamed chain-of-thought text.
+type ReasoningTextDeltaNotification struct {
+	ThreadId     string `json:"threadId"`
+	TurnId       string `json:"turnId"`
+	ItemId       string `json:"itemId"`
+	Delta        string `json:"delta"`
+	ContentIndex int64  `json:"contentIndex"`
+}
+
+// ReasoningSummaryTextDeltaNotification is the params payload of
+// `item/reasoning/summaryTextDelta` — streamed reasoning summary.
+type ReasoningSummaryTextDeltaNotification struct {
+	ThreadId     string `json:"threadId"`
+	TurnId       string `json:"turnId"`
+	ItemId       string `json:"itemId"`
+	Delta        string `json:"delta"`
+	SummaryIndex int64  `json:"summaryIndex"`
+}
+
+// PlanDeltaNotification is the params payload of `item/plan/delta` —
+// streamed proposed plan updates (experimental).
+type PlanDeltaNotification struct {
+	ThreadId string `json:"threadId"`
+	TurnId   string `json:"turnId"`
+	ItemId   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
+// TurnDiffUpdatedNotification is the params payload of `turn/diff/updated`
+// — aggregated unified diff across all file changes in the turn.
+type TurnDiffUpdatedNotification struct {
+	ThreadId string `json:"threadId"`
+	TurnId   string `json:"turnId"`
+	Diff     string `json:"diff"`
+}
+
+// AccountRateLimitsUpdatedNotification is the params payload of
+// `account/rateLimits/updated`.
+type AccountRateLimitsUpdatedNotification struct {
+	RateLimits RateLimitSnapshot `json:"rateLimits"`
+}
+
+// ThreadTokenUsageUpdatedNotification is the params payload of
+// `thread/tokenUsage/updated`.
+type ThreadTokenUsageUpdatedNotification struct {
+	ThreadId   string           `json:"threadId"`
+	TurnId     string           `json:"turnId"`
+	TokenUsage ThreadTokenUsage `json:"tokenUsage"`
+}
+
 type ErrorNotification struct {
-	ThreadId *string   `json:"threadId,omitempty"`
-	TurnId   *string   `json:"turnId,omitempty"`
-	Error    TurnError `json:"error"`
+	ThreadId  *string   `json:"threadId,omitempty"`
+	TurnId    *string   `json:"turnId,omitempty"`
+	Error     TurnError `json:"error"`
+	WillRetry bool      `json:"willRetry,omitempty"`
 }

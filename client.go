@@ -483,6 +483,20 @@ func (c *Conn) deliver(threadID string, ev Event) {
 	}
 }
 
+// broadcastEvent sends an event to every active subscriber. Used for
+// connection-scoped notifications (rate limits, etc.) that aren't tied
+// to a specific thread.
+func (c *Conn) broadcastEvent(ev Event) {
+	c.subsMu.Lock()
+	defer c.subsMu.Unlock()
+	for _, ch := range c.subs {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
+}
+
 // dispatchNotification routes inbound server notifications. Untyped
 // shapes fall through to UnknownEvent so consumers can detect drift.
 func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
@@ -529,6 +543,67 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		if err := json.Unmarshal(params, &p); err == nil {
 			c.deliver(p.ThreadId, &AgentMessageDeltaEvent{
 				ThreadID: p.ThreadId, TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+			})
+		}
+	case "item/commandExecution/outputDelta":
+		var p schema.CommandExecutionOutputDeltaNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContentDeltaEvent{
+				Kind: ContentDeltaCommandOutput, ThreadID: p.ThreadId,
+				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+			})
+		}
+	case "item/fileChange/outputDelta":
+		var p schema.FileChangeOutputDeltaNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContentDeltaEvent{
+				Kind: ContentDeltaFileChangeOutput, ThreadID: p.ThreadId,
+				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+			})
+		}
+	case "item/reasoning/textDelta":
+		var p schema.ReasoningTextDeltaNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContentDeltaEvent{
+				Kind: ContentDeltaReasoningText, ThreadID: p.ThreadId,
+				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+				ContentIndex: p.ContentIndex,
+			})
+		}
+	case "item/reasoning/summaryTextDelta":
+		var p schema.ReasoningSummaryTextDeltaNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContentDeltaEvent{
+				Kind: ContentDeltaReasoningSummary, ThreadID: p.ThreadId,
+				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+				SummaryIndex: p.SummaryIndex,
+			})
+		}
+	case "item/plan/delta":
+		var p schema.PlanDeltaNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContentDeltaEvent{
+				Kind: ContentDeltaPlan, ThreadID: p.ThreadId,
+				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,
+			})
+		}
+	case "turn/diff/updated":
+		var p schema.TurnDiffUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &TurnDiffUpdatedEvent{
+				ThreadID: p.ThreadId, TurnID: p.TurnId, Diff: p.Diff,
+			})
+		}
+	case "account/rateLimits/updated":
+		var p schema.AccountRateLimitsUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.broadcastEvent(&RateLimitsUpdatedEvent{RateLimits: p.RateLimits})
+		}
+	case "thread/tokenUsage/updated":
+		var p schema.ThreadTokenUsageUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &TokenUsageUpdatedEvent{
+				ThreadID: p.ThreadId, TurnID: p.TurnId, TokenUsage: p.TokenUsage,
 			})
 		}
 	case "error":

@@ -121,6 +121,75 @@ type StderrEvent struct {
 func (*StderrEvent) event()           {}
 func (e *StderrEvent) String() string { return fmt.Sprintf("StderrEvent{%s}", e.Line) }
 
+// ContentDeltaEvent is a unified event for all streaming content deltas:
+// command output, file change output, reasoning text, reasoning summaries,
+// and plan deltas. Kind discriminates the source; consumers that only care
+// about a subset can filter on Kind in a type switch.
+type ContentDeltaEvent struct {
+	Kind     ContentDeltaKind
+	ThreadID string
+	TurnID   string
+	ItemID   string
+	Delta    string
+
+	// ContentIndex is set for reasoning text deltas.
+	ContentIndex int64
+	// SummaryIndex is set for reasoning summary text deltas.
+	SummaryIndex int64
+}
+
+func (*ContentDeltaEvent) event() {}
+func (e *ContentDeltaEvent) String() string {
+	return fmt.Sprintf("ContentDeltaEvent{Kind: %s, Item: %s, len: %d}", e.Kind, e.ItemID, len(e.Delta))
+}
+
+// ContentDeltaKind classifies the source of a ContentDeltaEvent.
+type ContentDeltaKind string
+
+const (
+	ContentDeltaCommandOutput    ContentDeltaKind = "command_output"
+	ContentDeltaFileChangeOutput ContentDeltaKind = "file_change_output"
+	ContentDeltaReasoningText    ContentDeltaKind = "reasoning_text"
+	ContentDeltaReasoningSummary ContentDeltaKind = "reasoning_summary"
+	ContentDeltaPlan             ContentDeltaKind = "plan"
+)
+
+// TurnDiffUpdatedEvent corresponds to `turn/diff/updated` — the
+// aggregated unified diff across all file changes in the current turn.
+type TurnDiffUpdatedEvent struct {
+	ThreadID string
+	TurnID   string
+	Diff     string
+}
+
+func (*TurnDiffUpdatedEvent) event() {}
+func (e *TurnDiffUpdatedEvent) String() string {
+	return fmt.Sprintf("TurnDiffUpdatedEvent{Turn: %s, len: %d}", e.TurnID, len(e.Diff))
+}
+
+// RateLimitsUpdatedEvent corresponds to `account/rateLimits/updated`.
+type RateLimitsUpdatedEvent struct {
+	RateLimits schema.RateLimitSnapshot
+}
+
+func (*RateLimitsUpdatedEvent) event() {}
+func (e *RateLimitsUpdatedEvent) String() string {
+	return "RateLimitsUpdatedEvent{}"
+}
+
+// TokenUsageUpdatedEvent corresponds to `thread/tokenUsage/updated`.
+type TokenUsageUpdatedEvent struct {
+	ThreadID   string
+	TurnID     string
+	TokenUsage schema.ThreadTokenUsage
+}
+
+func (*TokenUsageUpdatedEvent) event() {}
+func (e *TokenUsageUpdatedEvent) String() string {
+	return fmt.Sprintf("TokenUsageUpdatedEvent{Thread: %s, Total: %d}",
+		e.ThreadID, e.TokenUsage.Total.TotalTokens)
+}
+
 // UnknownEvent is emitted for any server notification this SDK doesn't
 // recognize. Preserves the method name and raw payload so consumers can
 // keep working through protocol additions ahead of typed support.
