@@ -653,6 +653,10 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				ThreadID: p.ThreadId, TurnID: p.TurnId, TokenUsage: p.TokenUsage,
 			})
 		}
+	case schema.MethodSkillsChanged:
+		// Empty payload; no decode needed. Broadcast as an invalidation
+		// signal so consumers caching skills/list output can refresh.
+		c.broadcastEvent(&SkillsChangedEvent{})
 	case "error":
 		var p schema.ErrorNotification
 		if err := json.Unmarshal(params, &p); err == nil {

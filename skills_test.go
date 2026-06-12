@@ -124,6 +124,83 @@ func TestConnListSkills_HappyPath(t *testing.T) {
 	}
 }
 
+// TestSkillsChangedEvent_Dispatch drives a turn during which the server
+// emits a skills/changed notification, and asserts the SDK surfaces it as
+// a typed *SkillsChangedEvent on the stream.
+func TestSkillsChangedEvent_Dispatch(t *testing.T) {
+	fix := NewBidiFixtureExecutor()
+	client := NewWithExecutor(fix, WithEphemeralThread(), WithCwd("/tmp"))
+
+	go func() {
+		id, _ := expectRequest(t, fix, "initialize")
+		_ = fix.SendResponse(id, map[string]any{
+			"codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux", "userAgent": "test",
+		})
+		expectNotification(t, fix, "initialized")
+
+		threadID := "thr_skills"
+		id, _ = expectRequest(t, fix, "thread/start")
+		_ = fix.SendResponse(id, map[string]any{
+			"thread":         map[string]any{"id": threadID, "sessionId": "s", "cwd": "/tmp", "cliVersion": "x", "modelProvider": "openai", "ephemeral": true, "createdAt": 1, "updatedAt": 1, "preview": ""},
+			"cwd":            "/tmp",
+			"model":          "gpt-5",
+			"modelProvider":  "openai",
+			"approvalPolicy": "never",
+			"sandbox":        map[string]any{"mode": "read-only"},
+		})
+
+		turnID := "turn_skills"
+		id, _ = expectRequest(t, fix, "turn/start")
+		_ = fix.SendResponse(id, map[string]any{
+			"turn": map[string]any{"id": turnID, "status": "inProgress", "items": []any{}},
+		})
+		_ = fix.SendNotification("turn/started", map[string]any{
+			"threadId": threadID, "turn": map[string]any{"id": turnID, "status": "inProgress", "items": []any{}},
+		})
+		// Empty-payload skills/changed mid-turn.
+		_ = fix.SendNotification(schema.MethodSkillsChanged, map[string]any{})
+		_ = fix.SendNotification("turn/completed", map[string]any{
+			"threadId": threadID, "turn": map[string]any{"id": turnID, "status": "completed", "items": []any{}},
+		})
+		go func() {
+			for {
+				if _, err := fix.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+	}()
+
+	stream, err := client.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	defer stream.Close()
+
+	var sawChanged bool
+	deadline := time.After(3 * time.Second)
+loop:
+	for {
+		select {
+		case ev, ok := <-stream.Events():
+			if !ok {
+				break loop
+			}
+			switch ev.(type) {
+			case *SkillsChangedEvent:
+				sawChanged = true
+			case *TurnCompletedEvent:
+				break loop
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for events")
+		}
+	}
+	if !sawChanged {
+		t.Error("missing SkillsChangedEvent")
+	}
+}
+
 func TestConnSetSkillEnabled_ByNameAndPath(t *testing.T) {
 	fix := NewBidiFixtureExecutor()
 	client := NewWithExecutor(fix, WithEphemeralThread())

@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), token usage, rate limits, and aggregated diffs. MCP elicitation, fork, dynamic tools, and the file/exec/account RPC surfaces are not yet wired. Tested against codex CLI 0.133.0+.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), token usage, rate limits, aggregated diffs, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, and the file/exec/account RPC surfaces are not yet wired. Tested against codex CLI 0.133.0+.
 
 ## Install
 
@@ -85,6 +85,40 @@ For live model availability on a running connection, use `Conn.ListModels(ctx)` 
 
 Resolution order for the cache directory: `WithCodexHome(...)` option → `$CODEX_HOME` env var → `$HOME/.codex`.
 
+## Skills
+
+Unlike Claude Code — which pushes a flat list of skill names on its init event — codex does not advertise skills at thread start. Discovery is an explicit pull via the `skills/list` RPC, so call `Conn.ListSkills` when you actually need the list (e.g. to populate a picker), not on every connect.
+
+```go
+entries, err := conn.ListSkills(ctx, []string{"/path/to/repo"}, false /* forceReload */)
+if err != nil {
+    log.Fatal(err)
+}
+for _, e := range entries { // one entry per requested cwd
+    for _, s := range e.Skills {
+        fmt.Printf("%-20s [%s] enabled=%v — %s\n", s.Name, s.Scope, s.Enabled, s.Description)
+    }
+    for _, problem := range e.Errors { // skills that failed to parse
+        log.Printf("skill error at %s: %s", problem.Path, problem.Message)
+    }
+}
+```
+
+`SkillMetadata` carries more than a name: `Scope` (user/repo/system/admin), the optional `Interface` presentation block (display name, default prompt, brand color, icons), and declared tool `Dependencies`. Pass `forceReload=true` to bypass codex's in-memory cache; otherwise rely on the `SkillsChangedEvent` (the `skills/changed` notification) to know when a re-list is worthwhile.
+
+Invoke a skill in a turn by building a `skill` input. Prefer the discovery-aware `codexcli.SkillInput(meta)`, which pulls the name/path pair straight from a `SkillMetadata` and avoids mispairing a name with the wrong path when the same name is visible from multiple cwds:
+
+```go
+stream, err := thread.StartTurnInput(ctx, []schema.UserInput{
+    codexcli.SkillInput(entries[0].Skills[0]),     // from ListSkills
+    schema.TextInput("apply it to the open PR"),
+})
+```
+
+The low-level primitive `schema.SkillInput(name, path)` is also available, alongside `schema.MentionInput`, `schema.ImageInput`, and `schema.LocalImageInput` for the other per-turn input variants.
+
+Toggle a skill's enabled state with `Conn.SetSkillEnabledByName(ctx, name, enabled)` or `Conn.SetSkillEnabledByPath(ctx, path, enabled)` (use the path form to disambiguate when a name is visible from multiple scopes). Both return the *effective* enabled state after the write, which can differ from the requested value if another config layer overrides it.
+
 ## Events
 
 The event stream surfaces typed events for the full server notification set:
@@ -100,6 +134,7 @@ The event stream surfaces typed events for the full server notification set:
 | `TurnDiffUpdatedEvent` | `turn/diff/updated` | Aggregated unified diff for the turn |
 | `TokenUsageUpdatedEvent` | `thread/tokenUsage/updated` | Token usage snapshot |
 | `RateLimitsUpdatedEvent` | `account/rateLimits/updated` | Rate limit status (broadcast to all subscribers) |
+| `SkillsChangedEvent` | `skills/changed` | Local skill files changed — re-run `Conn.ListSkills` (broadcast to all subscribers) |
 | `ErrorEvent` | `error` | Recoverable or fatal error |
 | `ApprovalRequestEvent` | (server requests) | Approval request surfaced alongside callback dispatch |
 | `ProcessExitEvent` | (internal) | Subprocess terminated |
@@ -118,6 +153,7 @@ The event stream surfaces typed events for the full server notification set:
 | `thread.go` | `Thread` — start additional turns on the same conversation. |
 | `approval.go` | Sealed `ApprovalRequest` / `ApprovalDecision` interfaces, typed approval routing. |
 | `models.go` | `ListModels` (file-based) and `Conn.ListModels` (live RPC). |
+| `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
 | `schema/` | Hand-written Go types mirroring the JSON Schema surface. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
 | `cmd/codexdemo/` | End-to-end smoke test against the real codex CLI. |

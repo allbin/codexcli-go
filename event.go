@@ -190,6 +190,20 @@ func (e *TokenUsageUpdatedEvent) String() string {
 		e.ThreadID, e.TokenUsage.Total.TotalTokens)
 }
 
+// SkillsChangedEvent corresponds to the `skills/changed` notification:
+// codex detected a change in watched local skill files. It carries no
+// payload — treat it as an invalidation signal and re-run Conn.ListSkills
+// with your current parameters if you cache skill metadata.
+//
+// It is broadcast to every stream subscriber (it is not scoped to a single
+// thread), mirroring RateLimitsUpdatedEvent.
+type SkillsChangedEvent struct{}
+
+func (*SkillsChangedEvent) event() {}
+func (e *SkillsChangedEvent) String() string {
+	return "SkillsChangedEvent{}"
+}
+
 // UnknownEvent is emitted for any server notification this SDK doesn't
 // recognize. Preserves the method name and raw payload so consumers can
 // keep working through protocol additions ahead of typed support.
