@@ -43,12 +43,21 @@ type CommandExecutionRequestApprovalParams struct {
 	Reason      *string `json:"reason,omitempty"`
 	StartedAtMs int64   `json:"startedAtMs"`
 
-	CommandActions                  json.RawMessage `json:"commandActions,omitempty"`
+	// CommandActionsRaw holds the parsed-intent array verbatim; decode it
+	// via the CommandActions() accessor.
+	CommandActionsRaw               json.RawMessage `json:"commandActions,omitempty"`
 	NetworkApprovalContext          json.RawMessage `json:"networkApprovalContext,omitempty"`
 	ProposedExecpolicyAmendment     []string        `json:"proposedExecpolicyAmendment,omitempty"`
 	ProposedNetworkPolicyAmendments json.RawMessage `json:"proposedNetworkPolicyAmendments,omitempty"`
 	AdditionalPermissions           json.RawMessage `json:"additionalPermissions,omitempty"`
 	AvailableDecisions              json.RawMessage `json:"availableDecisions,omitempty"`
+}
+
+// CommandActions parses the parsed-intent array carried with the approval
+// request. Returns nil when absent or on parse error. Shares its shape and
+// parse with ThreadItem.CommandActions via ParseCommandActions.
+func (p CommandExecutionRequestApprovalParams) CommandActions() []CommandAction {
+	return ParseCommandActions(p.CommandActionsRaw)
 }
 
 // FileChangeRequestApprovalParams is the params payload of an
@@ -84,6 +93,13 @@ type ExecCommandApprovalParams struct {
 	ParsedCmd      json.RawMessage `json:"parsedCmd"`
 	Reason         *string         `json:"reason,omitempty"`
 	ApprovalID     *string         `json:"approvalId,omitempty"`
+}
+
+// ParsedCommandActions parses the legacy parsedCmd array into typed
+// CommandAction entries. Returns nil when absent or on parse error. Shares
+// its shape and parse with ThreadItem.CommandActions via ParseCommandActions.
+func (p ExecCommandApprovalParams) ParsedCommandActions() []CommandAction {
+	return ParseCommandActions(p.ParsedCmd)
 }
 
 // ApplyPatchApprovalParams is the params payload of the legacy

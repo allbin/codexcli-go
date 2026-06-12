@@ -1,6 +1,9 @@
 package schema
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // ClientInfo identifies the calling product during the `initialize`
 // handshake. Codex app-server uses this for OpenAI Compliance Logs
@@ -322,10 +325,12 @@ type TurnError struct {
 // "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
 // "reasoning", "plan", etc.).
 //
-// Common fields are promoted; type-specific fields live in typed
-// sub-structs that consumers can reach via CommandExecution(),
-// FileChange(), McpToolCall(), DynamicToolCall(), or Reasoning().
-// Raw preserves the full JSON for forward compatibility.
+// Common fields are promoted to typed fields above. Type-specific payloads
+// that arrive as JSON arrays/objects are reachable via typed accessors:
+// FileChanges() decodes a fileChange item's changes; CommandActions()
+// decodes a commandExecution item's parsed intents and CommandLiteral()
+// returns its unwrapped shell command. Raw preserves the full JSON for
+// forward compatibility and for payloads without a typed accessor yet.
 type ThreadItem struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
@@ -339,13 +344,14 @@ type ThreadItem struct {
 	// via UserMessageContent(), which guards on Type.
 	Content json.RawMessage `json:"content,omitempty"`
 
-	// CommandExecution fields.
-	Command          *string         `json:"command,omitempty"`
-	Cwd              *string         `json:"cwd,omitempty"`
-	ExitCode         *int            `json:"exitCode,omitempty"`
-	AggregatedOutput *string         `json:"aggregatedOutput,omitempty"`
-	Source           *string         `json:"source,omitempty"`
-	CommandActions   json.RawMessage `json:"commandActions,omitempty"`
+	// CommandExecution fields. CommandActionsRaw holds the parsed-intent
+	// array verbatim; decode it via the CommandActions() accessor.
+	Command           *string         `json:"command,omitempty"`
+	Cwd               *string         `json:"cwd,omitempty"`
+	ExitCode          *int            `json:"exitCode,omitempty"`
+	AggregatedOutput  *string         `json:"aggregatedOutput,omitempty"`
+	Source            *string         `json:"source,omitempty"`
+	CommandActionsRaw json.RawMessage `json:"commandActions,omitempty"`
 
 	// FileChange fields.
 	Changes json.RawMessage `json:"changes,omitempty"`
@@ -391,10 +397,40 @@ func (t *ThreadItem) UnmarshalJSON(data []byte) error {
 }
 
 // FileUpdateChange is a single entry in a fileChange item's changes array.
+// KindRaw preserves the wire form of the change discriminator, which codex
+// emits in several shapes; decode it via the Kind() accessor.
 type FileUpdateChange struct {
-	Path string          `json:"path"`
-	Diff string          `json:"diff"`
-	Kind json.RawMessage `json:"kind"`
+	Path    string          `json:"path"`
+	Diff    string          `json:"diff"`
+	KindRaw json.RawMessage `json:"kind"`
+}
+
+// Kind normalizes the change discriminator to one of "add", "update", or
+// "delete". It tolerates every shape codex has emitted: a bare string
+// ("add"), an internally-tagged object ({"type":"add"}), and an
+// externally-tagged enum ({"add":{…}}). Returns "" when absent or
+// unrecognized.
+func (c FileUpdateChange) Kind() string {
+	if len(c.KindRaw) == 0 {
+		return ""
+	}
+	var str string
+	if json.Unmarshal(c.KindRaw, &str) == nil {
+		return str
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(c.KindRaw, &obj) == nil {
+		if t, ok := obj["type"]; ok {
+			var ts string
+			if json.Unmarshal(t, &ts) == nil {
+				return ts
+			}
+		}
+		for k := range obj {
+			return k
+		}
+	}
+	return ""
 }
 
 // FileChanges parses the changes array when Type == "fileChange".
@@ -420,6 +456,79 @@ func (t *ThreadItem) UserMessageContent() []UserInput {
 	var out []UserInput
 	_ = json.Unmarshal(t.Content, &out)
 	return out
+}
+
+// CommandAction is one entry of a commandExecution item's commandActions
+// array — codex's parsed intent for the command it intends to run. Type
+// discriminates the shape: "read"/"update" carry a Path, "search" carries
+// a Query (and usually a Path), and "unknown" carries only the literal Cmd.
+// Cmd, when present, holds the shell command codex derived the intent from.
+type CommandAction struct {
+	Type  string `json:"type"`
+	Path  string `json:"path,omitempty"`
+	Query string `json:"query,omitempty"`
+	Cmd   string `json:"cmd,omitempty"`
+}
+
+// ParseCommandActions decodes a commandActions / parsedCmd array into typed
+// CommandAction entries. It is the shared parse behind ThreadItem,
+// CommandExecutionRequestApprovalParams, and ExecCommandApprovalParams.
+// Returns nil for empty input or on parse error.
+func ParseCommandActions(raw json.RawMessage) []CommandAction {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []CommandAction
+	if json.Unmarshal(raw, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// CommandActions parses the parsed-intent array on a commandExecution item.
+// Returns nil for items without command actions or on parse error.
+func (t *ThreadItem) CommandActions() []CommandAction {
+	return ParseCommandActions(t.CommandActionsRaw)
+}
+
+// CommandLiteral returns the human-readable command for a commandExecution
+// item, unwrapping the "<shell> -lc '…'" envelope codex wraps shell commands
+// in (see UnwrapShellCommand). It prefers the item's Command field and falls
+// back to the literal Cmd recorded on the first parsed action. Returns ""
+// when neither is present.
+func (t *ThreadItem) CommandLiteral() string {
+	if t.Command != nil && *t.Command != "" {
+		return UnwrapShellCommand(*t.Command)
+	}
+	for _, a := range t.CommandActions() {
+		if a.Cmd != "" {
+			return UnwrapShellCommand(a.Cmd)
+		}
+	}
+	return ""
+}
+
+// UnwrapShellCommand extracts the inner script from a "<shell> -lc '…'" (or
+// "-c") invocation — e.g. "/usr/bin/bash -lc 'cat foo.txt'" yields
+// "cat foo.txt" — decoding the POSIX '\” escape for embedded single quotes.
+// Input that isn't wrapped is returned trimmed but otherwise unchanged.
+func UnwrapShellCommand(cmd string) string {
+	s := strings.TrimSpace(cmd)
+	for _, flag := range []string{" -lc ", " -c ", " -lc\t", " -c\t"} {
+		if i := strings.Index(s, flag); i >= 0 {
+			return unquoteSingle(strings.TrimSpace(s[i+len(flag):]))
+		}
+	}
+	return s
+}
+
+// unquoteSingle strips a surrounding pair of single quotes and decodes the
+// POSIX '\” escape sequence for embedded single quotes.
+func unquoteSingle(s string) string {
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return strings.ReplaceAll(s[1:len(s)-1], `'\''`, `'`)
+	}
+	return s
 }
 
 // TokenUsageBreakdown holds per-turn or aggregate token counts.
