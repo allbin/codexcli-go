@@ -163,6 +163,31 @@ type UserInput struct {
 // TextInput is a convenience constructor for the most common case.
 func TextInput(text string) UserInput { return UserInput{Type: "text", Text: text} }
 
+// ImageInput builds an "image" input block referencing a remote URL. The
+// codex app-server fetches the URL; use LocalImageInput for a file on the
+// machine running codex.
+func ImageInput(url string) UserInput { return UserInput{Type: "image", URL: url} }
+
+// LocalImageInput builds a "localImage" input block referencing a file
+// path readable by the codex process.
+func LocalImageInput(path string) UserInput { return UserInput{Type: "localImage", Path: path} }
+
+// SkillInput builds a "skill" input block that invokes a codex skill by
+// name. Both name and path are required by the wire protocol; obtain them
+// from a SkillMetadata returned by the skills/list RPC (see
+// codexcli.Conn.ListSkills) rather than hand-constructing paths, since the
+// path is resolved per working directory.
+func SkillInput(name, path string) UserInput {
+	return UserInput{Type: "skill", Name: name, Path: path}
+}
+
+// MentionInput builds a "mention" input block referencing a file by name
+// and path, mirroring an editor @-mention. Both fields are required by the
+// wire protocol.
+func MentionInput(name, path string) UserInput {
+	return UserInput{Type: "mention", Name: name, Path: path}
+}
+
 // TurnStartParams is the `turn/start` request payload.
 //
 // Threading the same forward-compat strategy as ThreadStartParams:
