@@ -43,6 +43,9 @@ type options struct {
 	// approval routing
 	approvalFunc      ApprovalFunc
 	serverRequestFunc ServerRequestFunc
+
+	// command output reconstruction
+	accumulateOutput bool
 }
 
 // ClientOption configures the Client itself (not individual Run calls).
@@ -192,6 +195,26 @@ func WithStderrCallback(fn func(string)) Option {
 // tool failure. Returning a nil decision is treated as Decline.
 func WithApprovalHandler(fn ApprovalFunc) Option {
 	return func(o *options) { o.approvalFunc = fn }
+}
+
+// WithAccumulatedOutput makes the SDK reconstruct a command's output
+// from its streamed deltas. Codex app-server emits a commandExecution
+// item's stdout/stderr only via item/commandExecution/outputDelta
+// notifications and in practice leaves aggregatedOutput null on the
+// completed item, so consumers otherwise have to buffer the deltas
+// themselves to recover the final output.
+//
+// With this option set, the SDK buffers those deltas keyed by item id
+// and, on item/completed, populates the item's AggregatedOutput from the
+// buffer when the server left it empty (a non-empty server value always
+// wins). The per-item buffer is drained on completion so nothing leaks
+// across a long-lived connection.
+//
+// Off by default: without it, completed items pass through unchanged and
+// consumers reconstruct output from ContentDeltaEvent (Kind
+// ContentDeltaCommandOutput) themselves.
+func WithAccumulatedOutput() Option {
+	return func(o *options) { o.accumulateOutput = true }
 }
 
 // WithServerRequestHandler registers a callback for non-approval

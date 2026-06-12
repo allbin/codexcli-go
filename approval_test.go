@@ -260,6 +260,67 @@ loop:
 	wg.Wait()
 }
 
+// TestApprovalRequest_ItemID checks that ItemID() returns the v2 thread
+// item id for the v2 approval kinds and "" for the legacy v1 kinds that
+// only carry a callId.
+func TestApprovalRequest_ItemID(t *testing.T) {
+	tests := []struct {
+		name string
+		req  ApprovalRequest
+		want string
+	}{
+		{
+			name: "commandExecution",
+			req:  &CommandExecutionApprovalRequest{Params: schema.CommandExecutionRequestApprovalParams{ItemID: "item_cmd"}},
+			want: "item_cmd",
+		},
+		{
+			name: "fileChange",
+			req:  &FileChangeApprovalRequest{Params: schema.FileChangeRequestApprovalParams{ItemID: "item_fc"}},
+			want: "item_fc",
+		},
+		{
+			name: "permissions",
+			req:  &PermissionsApprovalRequest{Params: schema.PermissionsRequestApprovalParams{ItemID: "item_perm"}},
+			want: "item_perm",
+		},
+		{
+			name: "legacy exec returns empty",
+			req:  &ExecCommandApprovalRequest{Params: schema.ExecCommandApprovalParams{CallID: "call_1"}},
+			want: "",
+		},
+		{
+			name: "legacy patch returns empty",
+			req:  &ApplyPatchApprovalRequest{Params: schema.ApplyPatchApprovalParams{CallID: "call_2"}},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.req.ItemID(); got != tt.want {
+				t.Errorf("ItemID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApprovalRequest_ItemID_FromDecode confirms the item id survives the
+// full wire decode so consumers reading off decodeApprovalRequest get it
+// without a type switch.
+func TestApprovalRequest_ItemID_FromDecode(t *testing.T) {
+	params := mustRawJSON(commandApprovalParams("thr", "turn", "item_42", "ls"))
+	req, err := decodeApprovalRequest(schema.MethodCommandExecutionRequestApproval, params)
+	if err != nil {
+		t.Fatalf("decodeApprovalRequest: %v", err)
+	}
+	if req == nil {
+		t.Fatal("decodeApprovalRequest returned nil request")
+	}
+	if got := req.ItemID(); got != "item_42" {
+		t.Errorf("decoded ItemID() = %q, want %q", got, "item_42")
+	}
+}
+
 // approvalScript captures the parameters runApprovalServer needs to
 // reproduce a single-approval turn.
 type approvalScript struct {

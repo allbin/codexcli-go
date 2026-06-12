@@ -160,6 +160,31 @@ The event stream surfaces typed events for the full server notification set:
 | `ProcessExitEvent` | (internal) | Subprocess terminated |
 | `UnknownEvent` | (any unrecognized) | Forward-compat for new server notifications |
 
+## Approvals
+
+Register a handler with `WithApprovalHandler`. The callback receives a sealed
+`ApprovalRequest`; `Method()`, `ThreadID()`, `TurnID()`, and `ItemID()` are
+available on every kind without a type switch. `ItemID()` correlates the
+approval with the eventual `item/started` / `item/completed` notifications —
+it returns the v2 thread item id for command-execution, file-change, and
+permissions approvals, and `""` for the legacy v1 (`execCommandApproval`,
+`applyPatchApproval`) kinds, which only carry a call id. Type-switch on the
+concrete request when you need kind-specific fields (the proposed command,
+diff, requested permissions, etc.).
+
+## Command output
+
+Codex app-server streams a `commandExecution` item's stdout/stderr via
+`item/commandExecution/outputDelta` notifications and, in practice, leaves
+`aggregatedOutput` null on the completed item. By default the SDK passes
+items through unchanged, so consumers reconstruct output from
+`ContentDeltaEvent` (`Kind == ContentDeltaCommandOutput`) themselves.
+
+Pass `WithAccumulatedOutput()` to have the SDK buffer those deltas keyed by
+item id and populate `ItemCompletedEvent.Item.AggregatedOutput` from the
+buffer when the server left it empty (a non-empty server value always wins).
+The per-item buffer is drained on completion.
+
 ## Architecture
 
 | File | Role |

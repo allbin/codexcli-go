@@ -204,6 +204,10 @@ type Conn struct {
 	threadsMu sync.Mutex
 	threads   map[string]*Thread
 
+	// cmdOutput reconstructs commandExecution output from streamed
+	// deltas when WithAccumulatedOutput is set. Self-synchronized.
+	cmdOutput cmdOutputAccumulator
+
 	stderrDone chan struct{}
 	stderrBuf  stderrRing
 
@@ -581,6 +585,9 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 	case "item/completed":
 		var p schema.ItemCompletedNotification
 		if err := json.Unmarshal(params, &p); err == nil {
+			if c.options.accumulateOutput {
+				c.applyAccumulatedOutput(&p.Item)
+			}
 			c.deliver(p.ThreadId, &ItemCompletedEvent{
 				ThreadID: p.ThreadId, TurnID: p.TurnId, Item: p.Item,
 			})
@@ -595,6 +602,9 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 	case "item/commandExecution/outputDelta":
 		var p schema.CommandExecutionOutputDeltaNotification
 		if err := json.Unmarshal(params, &p); err == nil {
+			if c.options.accumulateOutput {
+				c.cmdOutput.append(p.ItemId, p.Delta)
+			}
 			c.deliver(p.ThreadId, &ContentDeltaEvent{
 				Kind: ContentDeltaCommandOutput, ThreadID: p.ThreadId,
 				TurnID: p.TurnId, ItemID: p.ItemId, Delta: p.Delta,

@@ -30,6 +30,12 @@ type ApprovalRequest interface {
 	// TurnID returns the turn the approval relates to. May be empty for
 	// legacy approvals.
 	TurnID() string
+	// ItemID returns the thread item the approval relates to, letting
+	// consumers correlate an approval with the eventual item/started and
+	// item/completed notifications without a type switch. v2 approvals
+	// carry it directly; legacy v1 approvals (which only carry a callId)
+	// return "".
+	ItemID() string
 }
 
 // CommandExecutionApprovalRequest is delivered when the agent wants to
@@ -53,6 +59,9 @@ func (r *CommandExecutionApprovalRequest) ThreadID() string { return r.Params.Th
 // TurnID returns the turn id.
 func (r *CommandExecutionApprovalRequest) TurnID() string { return r.Params.TurnID }
 
+// ItemID returns the commandExecution item id this approval gates.
+func (r *CommandExecutionApprovalRequest) ItemID() string { return r.Params.ItemID }
+
 // FileChangeApprovalRequest is delivered when the agent proposes a file
 // change on a v2 turn.
 type FileChangeApprovalRequest struct {
@@ -70,6 +79,9 @@ func (r *FileChangeApprovalRequest) ThreadID() string { return r.Params.ThreadID
 // TurnID returns the turn id.
 func (r *FileChangeApprovalRequest) TurnID() string { return r.Params.TurnID }
 
+// ItemID returns the fileChange item id this approval gates.
+func (r *FileChangeApprovalRequest) ItemID() string { return r.Params.ItemID }
+
 // PermissionsApprovalRequest is delivered by the request_permissions tool.
 type PermissionsApprovalRequest struct {
 	Params schema.PermissionsRequestApprovalParams
@@ -85,6 +97,9 @@ func (r *PermissionsApprovalRequest) ThreadID() string { return r.Params.ThreadI
 
 // TurnID returns the turn id.
 func (r *PermissionsApprovalRequest) TurnID() string { return r.Params.TurnID }
+
+// ItemID returns the permissions item id this approval gates.
+func (r *PermissionsApprovalRequest) ItemID() string { return r.Params.ItemID }
 
 // ExecCommandApprovalRequest is the legacy v1 shell-command approval.
 type ExecCommandApprovalRequest struct {
@@ -102,6 +117,10 @@ func (r *ExecCommandApprovalRequest) ThreadID() string { return r.Params.Convers
 // TurnID returns the call id (legacy turns don't carry a separate turn id).
 func (r *ExecCommandApprovalRequest) TurnID() string { return r.Params.CallID }
 
+// ItemID returns "" — legacy v1 exec approvals carry only a callId, not
+// a v2 thread item id.
+func (*ExecCommandApprovalRequest) ItemID() string { return "" }
+
 // ApplyPatchApprovalRequest is the legacy v1 patch approval.
 type ApplyPatchApprovalRequest struct {
 	Params schema.ApplyPatchApprovalParams
@@ -117,6 +136,10 @@ func (r *ApplyPatchApprovalRequest) ThreadID() string { return r.Params.Conversa
 
 // TurnID returns the call id (legacy turns don't carry a separate turn id).
 func (r *ApplyPatchApprovalRequest) TurnID() string { return r.Params.CallID }
+
+// ItemID returns "" — legacy v1 patch approvals carry only a callId, not
+// a v2 thread item id.
+func (*ApplyPatchApprovalRequest) ItemID() string { return "" }
 
 // ApprovalDecision is the sealed response interface. Each concrete type
 // marshals to the wire shape the server expects for the matched request.
