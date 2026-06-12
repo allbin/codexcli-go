@@ -99,8 +99,10 @@ func WithModelProvider(provider string) Option {
 	return func(o *options) { o.modelProvider = provider }
 }
 
-// WithApprovalPolicy sets the legacy thread-level approval policy. Use
-// the raw JSON form for the granular variant.
+// WithApprovalPolicy sets the legacy thread-level approval policy. Build
+// the bare-string form with schema.NewAskForApprovalString or the object
+// form with schema.NewGranularApproval (the latter also requires
+// WithExperimentalAPI).
 func WithApprovalPolicy(policy schema.AskForApproval) Option {
 	return func(o *options) { o.approval = &policy }
 }

@@ -119,6 +119,26 @@ The low-level primitive `schema.SkillInput(name, path)` is also available, along
 
 Toggle a skill's enabled state with `Conn.SetSkillEnabledByName(ctx, name, enabled)` or `Conn.SetSkillEnabledByPath(ctx, path, enabled)` (use the path form to disambiguate when a name is visible from multiple scopes). Both return the *effective* enabled state after the write, which can differ from the requested value if another config layer overrides it.
 
+When a turn is started with a skill input, codex echoes it back inside the `userMessage` thread item — `item.UserMessageContent()` decodes the content blocks (text/skill/mention/image) as the `UserInput` union, so a consumer rendering "what was sent" can see the skill block, not just the text.
+
+### Skill approval
+
+codex has **no skill-specific approval request type**. Attaching a `skill` input is self-authorizing — it just runs. When the model autonomously reads a skill it does so via a normal `commandExecution`, gated (if at all) by the command-approval path the SDK already routes. So there is nothing skill-specific to handle in your `ApprovalFunc`.
+
+Skill approval *can* be gated through the granular approval policy, which is an experimental surface — it must be paired with `WithExperimentalAPI()` or the server rejects `thread/start` with `askForApproval.granular requires experimentalApi capability`:
+
+```go
+client := codexcli.New(
+    codexcli.WithExperimentalAPI(),
+    codexcli.WithApprovalPolicy(schema.NewGranularApproval(schema.GranularApproval{
+        SandboxApproval: true,
+        SkillApproval:   true,
+    })),
+)
+```
+
+Read a policy back with `policy.Granular()` (returns the toggles and `true` for the object form) or `policy.AskForApprovalString()` (the bare-string form: `"untrusted"`, `"on-failure"`, `"on-request"`, `"never"`).
+
 ## Events
 
 The event stream surfaces typed events for the full server notification set:

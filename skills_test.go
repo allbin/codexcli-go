@@ -124,6 +124,95 @@ func TestConnListSkills_HappyPath(t *testing.T) {
 	}
 }
 
+// TestExperimentalApiAndGranularApproval_ReachWire verifies that
+// WithExperimentalAPI surfaces as capabilities.experimentalApi on the
+// initialize frame, and that a granular approval policy with skill_approval
+// set reaches thread/start intact — the two things a live codex requires to
+// drive skill approval.
+func TestExperimentalApiAndGranularApproval_ReachWire(t *testing.T) {
+	fix := NewBidiFixtureExecutor()
+	client := NewWithExecutor(fix,
+		WithEphemeralThread(),
+		WithCwd("/tmp"),
+		WithExperimentalAPI(),
+		WithApprovalPolicy(schema.NewGranularApproval(schema.GranularApproval{
+			McpElicitations: false, Rules: false, SandboxApproval: false, SkillApproval: true,
+		})),
+	)
+
+	type caps struct {
+		ExperimentalApi bool `json:"experimentalApi"`
+	}
+	gotCaps := make(chan caps, 1)
+	gotApproval := make(chan schema.AskForApproval, 1)
+
+	go func() {
+		id, params := expectRequest(t, fix, "initialize")
+		var ip struct {
+			Capabilities caps `json:"capabilities"`
+		}
+		_ = json.Unmarshal(params, &ip)
+		gotCaps <- ip.Capabilities
+		_ = fix.SendResponse(id, map[string]any{
+			"codexHome": "/tmp", "platformFamily": "unix", "platformOs": "linux", "userAgent": "test",
+		})
+		expectNotification(t, fix, "initialized")
+
+		id, params = expectRequest(t, fix, "thread/start")
+		var tp struct {
+			ApprovalPolicy schema.AskForApproval `json:"approvalPolicy"`
+		}
+		_ = json.Unmarshal(params, &tp)
+		gotApproval <- tp.ApprovalPolicy
+		_ = fix.SendResponse(id, map[string]any{
+			"thread":         map[string]any{"id": "t", "sessionId": "s", "cwd": "/tmp", "cliVersion": "x", "modelProvider": "openai", "ephemeral": true, "createdAt": 1, "updatedAt": 1, "preview": ""},
+			"cwd":            "/tmp",
+			"model":          "gpt-5",
+			"modelProvider":  "openai",
+			"approvalPolicy": "never",
+			"sandbox":        map[string]any{"mode": "read-only"},
+		})
+		go func() {
+			for {
+				if _, err := fix.ReadFrame(); err != nil {
+					return
+				}
+			}
+		}()
+	}()
+
+	conn, err := client.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.NewThread(context.Background()); err != nil {
+		t.Fatalf("NewThread: %v", err)
+	}
+
+	select {
+	case c := <-gotCaps:
+		if !c.ExperimentalApi {
+			t.Error("initialize did not carry capabilities.experimentalApi=true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no initialize frame")
+	}
+
+	select {
+	case ap := <-gotApproval:
+		g, ok := ap.Granular()
+		if !ok {
+			t.Fatalf("thread/start approvalPolicy not granular: %s", string(ap.Raw))
+		}
+		if !g.SkillApproval {
+			t.Errorf("skill_approval = false, want true (raw: %s)", string(ap.Raw))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no thread/start frame")
+	}
+}
+
 // TestSkillsChangedEvent_Dispatch drives a turn during which the server
 // emits a skills/changed notification, and asserts the SDK surfaces it as
 // a typed *SkillsChangedEvent on the stream.

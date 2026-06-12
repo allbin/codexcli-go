@@ -83,6 +83,50 @@ func NewAskForApprovalString(s string) AskForApproval {
 	return AskForApproval{Raw: b}
 }
 
+// GranularApproval is the object form of an approval policy: per-category
+// toggles that decide which agent actions require explicit approval.
+//
+// The server only accepts this form when the connection opted into the
+// experimental API (codexcli.WithExperimentalAPI); without it, thread/start
+// rejects the policy with "askForApproval.granular requires experimentalApi
+// capability".
+//
+// McpElicitations, Rules, and SandboxApproval are required by the wire
+// protocol and always serialized. RequestPermissions and SkillApproval
+// default to false and are omitted when false.
+type GranularApproval struct {
+	McpElicitations    bool `json:"mcp_elicitations"`
+	Rules              bool `json:"rules"`
+	SandboxApproval    bool `json:"sandbox_approval"`
+	RequestPermissions bool `json:"request_permissions,omitempty"`
+	// SkillApproval gates skill use. Note: codex has no skill-specific
+	// approval request type — when this fires it reuses an existing
+	// request shape (e.g. commandExecution for a skill the model reads
+	// from disk), which the SDK's approval routing already handles.
+	SkillApproval bool `json:"skill_approval,omitempty"`
+}
+
+// NewGranularApproval constructs the granular ("object") approval variant.
+// Pair it with codexcli.WithExperimentalAPI, or the server rejects it.
+func NewGranularApproval(g GranularApproval) AskForApproval {
+	b, _ := json.Marshal(struct {
+		Granular GranularApproval `json:"granular"`
+	}{Granular: g})
+	return AskForApproval{Raw: b}
+}
+
+// Granular returns the granular variant and true when the policy is in
+// object form, or a zero value and false for the bare-string variant.
+func (a AskForApproval) Granular() (GranularApproval, bool) {
+	var wrap struct {
+		Granular *GranularApproval `json:"granular"`
+	}
+	if err := json.Unmarshal(a.Raw, &wrap); err != nil || wrap.Granular == nil {
+		return GranularApproval{}, false
+	}
+	return *wrap.Granular, true
+}
+
 // SandboxMode is the legacy thread-level sandbox shorthand.
 // Values: "read-only", "workspace-write", "danger-full-access".
 type SandboxMode string
@@ -152,12 +196,36 @@ type ThreadStartResponse struct {
 
 // UserInput is the per-turn input union. Type discriminates: "text",
 // "image", "localImage", "skill", "mention".
+//
+// The same union is echoed back on the server side as the content blocks
+// of a "userMessage" thread item (see ThreadItem.UserMessageContent), so
+// this struct doubles as both the input and the read-back shape. Detail and
+// TextElements are populated only on read-back; the input constructors
+// leave them unset.
 type UserInput struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
 	URL  string `json:"url,omitempty"`
 	Path string `json:"path,omitempty"`
 	Name string `json:"name,omitempty"`
+	// Detail is the image fidelity hint on "image"/"localImage" blocks.
+	Detail *string `json:"detail,omitempty"`
+	// TextElements are UI-defined spans within Text on "text" blocks (e.g.
+	// rendered placeholders). Present on read-back, omitted on input.
+	TextElements []TextElement `json:"text_elements,omitempty"`
+}
+
+// TextElement is a span within a text block's Text buffer that the UI
+// renders or persists specially (an @-mention chip, a file pill, etc.).
+type TextElement struct {
+	ByteRange   ByteRange `json:"byteRange"`
+	Placeholder *string   `json:"placeholder,omitempty"`
+}
+
+// ByteRange is a [Start, End) byte span within a parent text buffer.
+type ByteRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // TextInput is a convenience constructor for the most common case.
@@ -266,6 +334,11 @@ type ThreadItem struct {
 	Text  string  `json:"text,omitempty"`
 	Phase *string `json:"phase,omitempty"`
 
+	// UserMessage / Reasoning fields. Both item types carry a "content"
+	// array but with different element shapes; reach userMessage content
+	// via UserMessageContent(), which guards on Type.
+	Content json.RawMessage `json:"content,omitempty"`
+
 	// CommandExecution fields.
 	Command          *string         `json:"command,omitempty"`
 	Cwd              *string         `json:"cwd,omitempty"`
@@ -332,6 +405,20 @@ func (t *ThreadItem) FileChanges() []FileUpdateChange {
 	}
 	var out []FileUpdateChange
 	_ = json.Unmarshal(t.Changes, &out)
+	return out
+}
+
+// UserMessageContent parses the content blocks of a "userMessage" item
+// into the UserInput union — the text, skill, mention, and image blocks
+// the turn was started with, echoed back by the server. Returns nil for
+// non-userMessage items (the "content" field is also used by reasoning
+// items, with a different shape) or on parse error.
+func (t *ThreadItem) UserMessageContent() []UserInput {
+	if t.Type != ItemTypeUserMessage || len(t.Content) == 0 {
+		return nil
+	}
+	var out []UserInput
+	_ = json.Unmarshal(t.Content, &out)
 	return out
 }
 
