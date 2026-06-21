@@ -59,6 +59,7 @@ func (e *LocalExecutor) Start(ctx context.Context, cfg *StartConfig) (*Process, 
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
+	hideConsoleWindow(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
