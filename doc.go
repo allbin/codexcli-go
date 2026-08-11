@@ -26,8 +26,10 @@
 // conversations.
 //
 // Models: ListModels reads the codex CLI's on-disk model cache
-// ($CODEX_HOME/models_cache.json). Conn.ListModels queries the running
-// server via the model/list RPC for live availability.
+// ($CODEX_HOME/models_cache.json) and returns []ModelInfo. Conn.ListModels
+// queries the running server via the model/list RPC for live availability
+// and returns []schema.Model — a different projection of the registry, not
+// interchangeable with ModelInfo.
 //
 // # Events
 //
@@ -35,9 +37,19 @@
 // turn lifecycle (TurnStartedEvent, TurnCompletedEvent), item lifecycle
 // (ItemStartedEvent, ItemCompletedEvent), content deltas
 // (AgentMessageDeltaEvent, ContentDeltaEvent for command output, file
-// changes, reasoning, plan), token usage (TokenUsageUpdatedEvent), rate
+// changes, reasoning, plan), thread status (ThreadStatusChangedEvent),
+// plans (TurnPlanUpdatedEvent), token usage (TokenUsageUpdatedEvent), rate
 // limits (RateLimitsUpdatedEvent), and aggregated diffs
-// (TurnDiffUpdatedEvent).
+// (TurnDiffUpdatedEvent). Anything unrecognized arrives as UnknownEvent.
+//
+// Note token usage is only available via TokenUsageUpdatedEvent — codex
+// removed the usage field from the Turn object after 0.133.
+//
+// # Compatibility
+//
+// Verified end-to-end against codex CLI 0.147.0. See the README's
+// "Upgrading to codex 0.147" section for the three changes that need
+// consumer action.
 //
 // # Resume
 //

@@ -437,6 +437,12 @@ func basicThreadStartResponse(threadID string) map[string]any {
 // drainTurn reads stream events until it sees TurnCompletedEvent or
 // hits the timeout. Returns the final turn or an error.
 func drainTurn(s *Stream, timeout time.Duration) (*schema.Turn, error) {
+	return drainTurnObserving(s, timeout, nil)
+}
+
+// drainTurnObserving is drainTurn with a hook run on every event, for
+// tests that assert on what streamed past on the way to completion.
+func drainTurnObserving(s *Stream, timeout time.Duration, observe func(Event)) (*schema.Turn, error) {
 	deadline := time.After(timeout)
 	for {
 		select {
@@ -444,6 +450,9 @@ func drainTurn(s *Stream, timeout time.Duration) (*schema.Turn, error) {
 			if !ok {
 				turn, err := s.Wait()
 				return turn, err
+			}
+			if observe != nil {
+				observe(ev)
 			}
 			if e, ok := ev.(*TurnCompletedEvent); ok {
 				return &e.Turn, nil

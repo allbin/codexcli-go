@@ -1,8 +1,8 @@
 package schema
 
-// Skill RPC method and notification names. Keep in sync with
-// /tmp/codex-schema (codex app-server generate-json-schema): ClientRequest.json
-// for the request methods and ServerNotification.json for skills/changed.
+// Skill RPC method and notification names. Keep in sync with the bundle
+// `go generate ./schema` writes to schema/v2_raw/: ClientRequest.json for
+// the request methods and ServerNotification.json for skills/changed.
 const (
 	// MethodSkillsList is the `skills/list` request: discover skills visible
 	// from one or more working directories.

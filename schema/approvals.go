@@ -3,7 +3,8 @@ package schema
 import "encoding/json"
 
 // Server-initiated approval request method names. The constants are
-// authoritative — keep this list in sync with /tmp/codex-schema/ServerRequest.json.
+// authoritative — keep this list in sync with the ServerRequest.json
+// emitted by `go generate ./schema` into schema/v2_raw/.
 const (
 	// MethodCommandExecutionRequestApproval is the v2 server request method
 	// sent when the agent wants to run a shell command and the policy

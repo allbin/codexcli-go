@@ -10,12 +10,12 @@ import (
 	"github.com/allbin/codexcli-go/schema"
 )
 
-// TestTranscript_HappyTurnReplay drives the SDK against the JSONL
-// transcript recorded by cmd/capture, exercising the codepath consumers
-// will hit against a real codex install — including the noisy startup
-// notifications (configWarning, mcpServer/startupStatus/updated,
-// thread/status/changed, account/rateLimits/updated, ...) that surface
-// as UnknownEvent today.
+// TestTranscript_HappyTurnReplay drives the SDK against a JSONL
+// transcript recorded by cmd/capture from a real codex 0.147.0 install,
+// exercising the codepath consumers actually hit — including the noisy
+// startup notifications (mcpServer/startupStatus/updated,
+// thread/status/changed, account/rateLimits/updated, ...) that used to
+// fall through to UnknownEvent.
 //
 // The transcript is loose-matched: in-frames are matched by method
 // only, so per-run id differences don't fail the test.
@@ -38,7 +38,27 @@ func TestTranscript_HappyTurnReplay(t *testing.T) {
 	}
 	defer stream.Close()
 
-	turn, err := drainTurn(stream, 5*time.Second)
+	var unknown []string
+	var statuses []string
+	var cmdLiteral, cmdOutput string
+	var usage int64
+	turn, err := drainTurnObserving(stream, 5*time.Second, func(ev Event) {
+		switch e := ev.(type) {
+		case *UnknownEvent:
+			unknown = append(unknown, e.Method)
+		case *ThreadStatusChangedEvent:
+			statuses = append(statuses, e.Status)
+		case *TokenUsageUpdatedEvent:
+			usage = e.TokenUsage.Total.TotalTokens
+		case *ItemCompletedEvent:
+			if e.Item.Type == schema.ItemTypeCommandExecution {
+				cmdLiteral = e.Item.CommandLiteral()
+				if e.Item.AggregatedOutput != nil {
+					cmdOutput = *e.Item.AggregatedOutput
+				}
+			}
+		}
+	})
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
@@ -48,6 +68,31 @@ func TestTranscript_HappyTurnReplay(t *testing.T) {
 
 	if !strings.EqualFold(string(turn.Status), "completed") {
 		t.Errorf("turn status = %q, want completed", turn.Status)
+	}
+
+	// A real turn must be fully typed. A new method showing up here is the
+	// signal that codex moved and this SDK needs a protocol pass.
+	if len(unknown) > 0 {
+		t.Errorf("unhandled notifications in a normal turn: %v", unknown)
+	}
+	// Codex brackets the turn with active/idle.
+	if len(statuses) != 2 || statuses[0] != "active" || statuses[1] != "idle" {
+		t.Errorf("thread statuses = %v, want [active idle]", statuses)
+	}
+	// Guards the cmd -> command rename: this decodes to "" if CommandAction
+	// or ThreadItem.Command regress.
+	if cmdLiteral != "echo hello-from-codex" {
+		t.Errorf("CommandLiteral() = %q", cmdLiteral)
+	}
+	if cmdOutput != "hello-from-codex\n" {
+		t.Errorf("AggregatedOutput = %q", cmdOutput)
+	}
+	// Usage only arrives via thread/tokenUsage/updated now.
+	if usage == 0 {
+		t.Error("no token usage observed")
+	}
+	if turn.Usage != nil {
+		t.Errorf("Turn.Usage = %+v, want nil (removed from the wire)", turn.Usage)
 	}
 }
 

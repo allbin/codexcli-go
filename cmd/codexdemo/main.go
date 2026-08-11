@@ -82,10 +82,30 @@ func printEvent(ev codexcli.Event) {
 		fmt.Printf("[Delta] %s", e.Delta)
 	case *codexcli.ItemCompletedEvent:
 		text := ""
-		if e.Item.Type == "agentMessage" {
+		switch e.Item.Type {
+		case schema.ItemTypeAgentMessage:
 			text = e.Item.Text
+		case schema.ItemTypeCommandExecution:
+			text = e.Item.CommandLiteral()
 		}
 		fmt.Printf("\n[ItemCompleted] type=%s id=%s text=%q\n", e.Item.Type, e.Item.ID, summarize(text))
+	case *codexcli.ThreadStatusChangedEvent:
+		fmt.Printf("[ThreadStatus] %s\n", e.Status)
+	case *codexcli.TurnPlanUpdatedEvent:
+		fmt.Printf("[Plan] %d steps\n", len(e.Plan))
+		for _, s := range e.Plan {
+			fmt.Printf("  - [%s] %s\n", s.Status, s.Step)
+		}
+	case *codexcli.TokenUsageUpdatedEvent:
+		// Usage lives here, not on the turn — codex removed Turn.usage.
+		fmt.Printf("[Tokens] total=%d last=%d\n",
+			e.TokenUsage.Total.TotalTokens, e.TokenUsage.Last.TotalTokens)
+	case *codexcli.ConfigWarningEvent:
+		fmt.Printf("[ConfigWarning] %s (%s)\n", e.Summary, e.Path)
+	case *codexcli.DeprecationNoticeEvent:
+		fmt.Printf("[Deprecated] %s — %s\n", e.Summary, e.Details)
+	case *codexcli.WarningEvent:
+		fmt.Printf("[Warning guardian=%v] %s\n", e.Guardian, e.Message)
 	case *codexcli.TurnCompletedEvent:
 		_ = printTurnSummary(e.Turn)
 	case *codexcli.ErrorEvent:

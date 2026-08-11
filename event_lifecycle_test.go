@@ -165,6 +165,22 @@ func TestDispatch_Warnings(t *testing.T) {
 	}
 }
 
+// TestDispatch_ConfigWarning covers the startup-time config diagnostic,
+// including the path that locates the offending file.
+func TestDispatch_ConfigWarning(t *testing.T) {
+	c, sub := newDispatchConn(t, "t1")
+	c.dispatchNotification("configWarning", json.RawMessage(
+		`{"summary":"unknown key","details":"foo","path":"/home/u/.codex/config.toml","range":null}`))
+
+	ev, ok := recvEvent(t, sub).(*ConfigWarningEvent)
+	if !ok {
+		t.Fatal("want *ConfigWarningEvent")
+	}
+	if ev.Summary != "unknown key" || ev.Path == "" {
+		t.Errorf("got %+v", ev)
+	}
+}
+
 func TestDispatch_DeprecationNotice(t *testing.T) {
 	c, sub := newDispatchConn(t, "t1")
 	c.dispatchNotification("deprecationNotice", json.RawMessage(

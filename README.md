@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), token usage, rate limits, aggregated diffs, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, and the file/exec/account RPC surfaces are not yet wired. Tested against codex CLI 0.133.0+.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, aggregated diffs, MCP server startup status, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, realtime/audio, and the file/exec/account/plugin RPC surfaces are not yet wired. Tested end-to-end against codex CLI 0.147.0; a normal turn produces no `UnknownEvent`.
 
 ## Install
 
@@ -32,11 +32,11 @@ for ev := range stream.Events() {
     case *codexcli.ContentDeltaEvent:
         // Command output, reasoning, plan deltas, etc.
         fmt.Printf("[%s] %s", e.Kind, e.Delta)
+    case *codexcli.TokenUsageUpdatedEvent:
+        // Token usage arrives on its own notification, not on the turn.
+        fmt.Printf("tokens: %d total\n", e.TokenUsage.Total.TotalTokens)
     case *codexcli.TurnCompletedEvent:
         fmt.Printf("\nstatus=%s duration=%dms\n", e.Turn.Status, *e.Turn.DurationMs)
-        if e.Turn.Usage != nil {
-            fmt.Printf("tokens: %d total\n", e.Turn.Usage.Total.TotalTokens)
-        }
     }
 }
 ```
@@ -81,9 +81,18 @@ for _, m := range models {
 }
 ```
 
-For live model availability on a running connection, use `Conn.ListModels(ctx)` which queries the server via the `model/list` RPC.
-
 Resolution order for the cache directory: `WithCodexHome(...)` option → `$CODEX_HOME` env var → `$HOME/.codex`.
+
+For live model availability on a running connection, use `Conn.ListModels(ctx)`, which queries the server via the `model/list` RPC and follows pagination to completion. Use `Conn.ListModelsPage` to page manually or to include hidden models.
+
+```go
+models, err := conn.ListModels(ctx)
+for _, m := range models {
+    fmt.Printf("%-20s %s (default=%v)\n", m.ID, m.DisplayName, m.IsDefault)
+}
+```
+
+**The two registries are different shapes.** The cache file uses snake_case and is typed as `codexcli.ModelInfo` (`Slug`, `Visibility`, `Priority`); the RPC uses camelCase and is typed as `schema.Model` (`ID`, `Hidden`, `IsDefault`). They are not interchangeable — do not unmarshal one into the other.
 
 ## Skills
 
@@ -137,7 +146,7 @@ client := codexcli.New(
 )
 ```
 
-Read a policy back with `policy.Granular()` (returns the toggles and `true` for the object form) or `policy.AskForApprovalString()` (the bare-string form: `"untrusted"`, `"on-failure"`, `"on-request"`, `"never"`).
+Read a policy back with `policy.Granular()` (returns the toggles and `true` for the object form) or `policy.AskForApprovalString()` (the bare-string form: `schema.ApprovalUntrusted`, `schema.ApprovalOnRequest`, `schema.ApprovalNever`). Older codex releases also accepted `"on-failure"`; it was dropped from the enum.
 
 ## Events
 
@@ -146,14 +155,24 @@ The event stream surfaces typed events for the full server notification set:
 | Event | Server notification | Description |
 |---|---|---|
 | `TurnStartedEvent` | `turn/started` | Turn accepted, generation starting |
-| `TurnCompletedEvent` | `turn/completed` | Turn finished (completed/interrupted/failed), carries `Turn.Usage` |
+| `TurnCompletedEvent` | `turn/completed` | Turn finished (completed/interrupted/failed) |
 | `ItemStartedEvent` | `item/started` | Item lifecycle begins |
-| `ItemCompletedEvent` | `item/completed` | Item finished with final state |
+| `ItemCompletedEvent` | `item/completed` | Item finished with final state, plus `CompletedAtMs` |
 | `AgentMessageDeltaEvent` | `item/agentMessage/delta` | Streaming assistant text |
 | `ContentDeltaEvent` | `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/reasoning/textDelta`, `item/reasoning/summaryTextDelta`, `item/plan/delta` | Streaming content — discriminate on `Kind` |
+| `ReasoningSummaryPartAddedEvent` | `item/reasoning/summaryPartAdded` | A new reasoning summary block opened at `SummaryIndex` |
+| `FileChangePatchUpdatedEvent` | `item/fileChange/patchUpdated` | In-progress change set for a `fileChange` item |
 | `TurnDiffUpdatedEvent` | `turn/diff/updated` | Aggregated unified diff for the turn |
-| `TokenUsageUpdatedEvent` | `thread/tokenUsage/updated` | Token usage snapshot |
+| `TurnPlanUpdatedEvent` | `turn/plan/updated` | The agent's todo plan, resent in full on every change |
+| `ThreadStatusChangedEvent` | `thread/status/changed` | Thread went active/idle — brackets every turn |
+| `ContextCompactedEvent` | `thread/compacted` | Codex summarised earlier history to fit the context window |
+| `TokenUsageUpdatedEvent` | `thread/tokenUsage/updated` | Token usage snapshot — the only source of usage since 0.14x |
 | `RateLimitsUpdatedEvent` | `account/rateLimits/updated` | Rate limit status (broadcast to all subscribers) |
+| `McpServerStatusEvent` | `mcpServer/startupStatus/updated` | MCP server startup progress (broadcast to all subscribers) |
+| `ModelReroutedEvent` | `model/rerouted` | Codex switched models mid-turn |
+| `WarningEvent` | `warning`, `guardianWarning` | User-facing advisory that is not a turn failure |
+| `ConfigWarningEvent` | `configWarning` | A problem in the user's `config.toml`, raised at connect (broadcast) |
+| `DeprecationNoticeEvent` | `deprecationNotice` | A protocol surface is going away — log these (broadcast) |
 | `SkillsChangedEvent` | `skills/changed` | Local skill files changed — re-run `Conn.ListSkills` (broadcast to all subscribers) |
 | `ErrorEvent` | `error` | Recoverable or fatal error |
 | `ApprovalRequestEvent` | (server requests) | Approval request surfaced alongside callback dispatch |
@@ -175,15 +194,18 @@ diff, requested permissions, etc.).
 ## Command output
 
 Codex app-server streams a `commandExecution` item's stdout/stderr via
-`item/commandExecution/outputDelta` notifications and, in practice, leaves
-`aggregatedOutput` null on the completed item. By default the SDK passes
-items through unchanged, so consumers reconstruct output from
-`ContentDeltaEvent` (`Kind == ContentDeltaCommandOutput`) themselves.
+`item/commandExecution/outputDelta` notifications. It *usually* also sets
+`aggregatedOutput` on the completed item — but not always (long or
+truncated output, PTY-backed commands, and interrupted turns have all been
+observed to leave it null), so a consumer that only reads
+`aggregatedOutput` will intermittently show nothing.
 
 Pass `WithAccumulatedOutput()` to have the SDK buffer those deltas keyed by
 item id and populate `ItemCompletedEvent.Item.AggregatedOutput` from the
 buffer when the server left it empty (a non-empty server value always wins).
-The per-item buffer is drained on completion.
+The per-item buffer is drained on completion. Without the option, items pass
+through unchanged and you reconstruct output from `ContentDeltaEvent`
+(`Kind == ContentDeltaCommandOutput`) yourself.
 
 ## Architecture
 
@@ -193,13 +215,14 @@ The per-item buffer is drained on completion.
 | `rpc.go` | JSON-RPC 2.0 framing over line-delimited JSON. Outbound request/response correlation by id; inbound dispatch to notify + request callbacks. Error chain preservation. |
 | `executor.go` | `Executor` interface + `LocalExecutor`. Swap in fakes for tests or remote execution. |
 | `option.go` | Functional options (`WithCwd`, `WithModel`, `WithEphemeralThread`, ...). Extras hatch via `WithThreadExtra` / `WithTurnExtra`. |
-| `event.go` | Sealed `Event` interface + typed events for the full notification set. |
+| `event.go` | Sealed `Event` interface + the turn/item lifecycle events. |
+| `event_lifecycle.go` | Thread-, plan-, and connection-level events added for codex 0.14x (status, plan, warnings, MCP startup, reroute). |
 | `stream.go` | `Stream` — channel-of-events with lifecycle tracking and `Wait()` for blocking callers. |
 | `thread.go` | `Thread` — start additional turns on the same conversation. |
 | `approval.go` | Sealed `ApprovalRequest` / `ApprovalDecision` interfaces, typed approval routing. |
 | `models.go` | `ListModels` (file-based) and `Conn.ListModels` (live RPC). |
 | `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
-| `schema/` | Hand-written Go types mirroring the JSON Schema surface. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
+| `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
 | `cmd/codexdemo/` | End-to-end smoke test against the real codex CLI. |
 | `cmd/capture/` | Records live JSON-RPC transcripts for test fixtures. |
@@ -233,11 +256,29 @@ Compare the updated schema files against `schema/types.go`. Look for:
 ### 3. Update the Go types
 
 Add new fields to the structs in `schema/types.go`. For new notification methods, add:
-1. A notification params struct in `schema/types.go`
-2. A typed `Event` implementation in `event.go`
+1. A method constant and params struct in `schema/notifications.go`
+2. A typed `Event` implementation in `event_lifecycle.go`
 3. A dispatch case in `dispatchNotification()` in `client.go`
+4. A case in `event_lifecycle_test.go` — the tests drive `dispatchNotification` directly with a raw payload, so no fixture plumbing is needed
 
-### 4. Why not code generation?
+### 4. Verify against the live CLI
+
+The schema bundle is necessary but not sufficient — it does not tell you which
+fields are actually populated, and it lists experimental-only fields alongside
+stable ones. Record a real transcript and read it:
+
+```
+go run ./cmd/capture -prompt "Run 'echo hi' and reply in one sentence." -out /tmp/live.jsonl
+```
+
+This is how the 0.147 bump caught three regressions the schema diff alone had
+made look cosmetic: `Turn.usage` vanishing, `commandActions.cmd` renaming to
+`command`, and `model/list` renaming `models` to `data`. The last two were
+silent — the fields simply decoded to empty.
+
+Finish by confirming a normal turn produces no `UnknownEvent`.
+
+### 5. Why not code generation?
 
 We evaluated `go-jsonschema` (atombender) and `oapi-codegen` against this schema bundle. Both produce non-idiomatic output: `go-jsonschema` generates ~700 lines per notification type with 40+ custom `UnmarshalJSON` methods; the `oneOf` discriminated unions (used by `ThreadItem`, `SandboxPolicy`, etc.) produce nested type aliases rather than idiomatic Go patterns. `oapi-codegen` targets OpenAPI 3, not raw JSON Schema Draft 7.
 
@@ -246,8 +287,25 @@ The hand-written types are intentionally minimal — they promote the fields con
 ## Protocol notes
 
 - `type X json.RawMessage` does **not** inherit `MarshalJSON`/`UnmarshalJSON`. A named alias becomes a bare `[]byte` for the encoding/json runtime, which then base64-decodes the payload. Use a struct wrapper or define the methods explicitly — see `schema.AskForApproval`.
-- `turn/completed` arrives with `items: []` even when item events were streamed. Rely on `item/*` notifications for the canonical incremental view, not the `Turn.Items` array.
-- `account/rateLimits/updated` is connection-scoped, not thread-scoped — it broadcasts to all subscribers.
+- `Turn.Items` is never the full picture: `turn/started` sends `itemsView: "notLoaded"` with an empty array, and `turn/completed` sends `itemsView: "summary"` with only the final assistant message. Rely on `item/*` notifications for the canonical incremental view.
+- `Turn.Usage` was removed from the wire after 0.133 and is always nil. Token usage only arrives via `thread/tokenUsage/updated` (`TokenUsageUpdatedEvent`), which fires more than once per turn — the last one wins.
+- `account/rateLimits/updated`, `mcpServer/startupStatus/updated`, `skills/changed`, and `deprecationNotice` are connection-scoped, not thread-scoped — they broadcast to all subscribers.
+- `commandActions` entries renamed their command field from `cmd` to `command`. `schema.CommandAction` decodes both and mirrors the value onto `Command` and the deprecated `Cmd`.
+- `model/list` returns `{data, nextCursor}` — not `{models}`, as it did on 0.133 — and its entries are a camelCase shape unrelated to `models_cache.json`.
+
+## Upgrading to codex 0.147
+
+Three changes need consumer action; the rest are additive.
+
+| Was | Now | Why |
+|---|---|---|
+| `conn.ListModels(ctx)` returned `[]json.RawMessage` | returns `[]schema.Model` | The RPC renamed `models` to `data`, so the old call silently returned nil. Entries are the camelCase RPC shape, **not** `ModelInfo`. |
+| `e.Turn.Usage.Total.TotalTokens` | handle `*TokenUsageUpdatedEvent` | `usage` was removed from the `Turn` schema; the field is now always nil. |
+| `action.Cmd` | `action.Command` | The wire key renamed `cmd` to `command`. `Cmd` still works — it is kept mirrored — but is deprecated. |
+
+`schema.CommandExecutionRequestApprovalParams.AdditionalPermissions` and
+`.AvailableDecisions` are now only sent when the connection opts in via
+`WithExperimentalAPI()`; they decode as empty otherwise.
 
 ## Conventions
 

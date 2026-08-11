@@ -31,7 +31,22 @@ const (
 	MethodGuardianWarning = "guardianWarning"
 	// MethodDeprecationNotice announces a protocol surface going away.
 	MethodDeprecationNotice = "deprecationNotice"
+	// MethodConfigWarning reports a problem in the user's config.toml. It
+	// fires during connection setup, before any thread exists.
+	MethodConfigWarning = "configWarning"
 )
+
+// ConfigWarningNotification is the params payload of `configWarning` —
+// codex found something wrong in config.toml. Path and Range locate the
+// offending entry when codex can pin it down.
+type ConfigWarningNotification struct {
+	Summary string  `json:"summary"`
+	Details *string `json:"details,omitempty"`
+	Path    *string `json:"path,omitempty"`
+	// Range is a TextRange within Path; left raw since consumers that
+	// care about it are editor integrations with their own position type.
+	Range json.RawMessage `json:"range,omitempty"`
+}
 
 // ThreadStatusChangedNotification is the params payload of
 // `thread/status/changed`.

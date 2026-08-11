@@ -143,6 +143,24 @@ func (e *WarningEvent) String() string {
 	return fmt.Sprintf("WarningEvent{Guardian: %v, Message: %s}", e.Guardian, e.Message)
 }
 
+// ConfigWarningEvent corresponds to `configWarning` — codex found a
+// problem in the user's config.toml. It arrives during connection setup,
+// before any thread exists, so it is broadcast rather than thread-scoped.
+//
+// Worth surfacing: a malformed config silently changes model, sandbox, or
+// approval behaviour, and this is the only notice the user gets.
+type ConfigWarningEvent struct {
+	Summary string
+	Details string
+	// Path is the config file that triggered the warning, when known.
+	Path string
+}
+
+func (*ConfigWarningEvent) event() {}
+func (e *ConfigWarningEvent) String() string {
+	return fmt.Sprintf("ConfigWarningEvent{%s}", e.Summary)
+}
+
 // DeprecationNoticeEvent corresponds to `deprecationNotice` — codex
 // announcing that a protocol surface is going away. Log these: they are
 // the earliest signal that this SDK needs updating for a newer CLI.

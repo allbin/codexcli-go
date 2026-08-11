@@ -740,6 +740,20 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				c.broadcastEvent(ev)
 			}
 		}
+	case schema.MethodConfigWarning:
+		var p schema.ConfigWarningNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &ConfigWarningEvent{Summary: p.Summary}
+			if p.Details != nil {
+				ev.Details = *p.Details
+			}
+			if p.Path != nil {
+				ev.Path = *p.Path
+			}
+			c.logger.Warn("codexcli: codex config warning",
+				"summary", ev.Summary, "path", ev.Path, "details", ev.Details)
+			c.broadcastEvent(ev)
+		}
 	case schema.MethodDeprecationNotice:
 		var p schema.DeprecationNoticeNotification
 		if err := json.Unmarshal(params, &p); err == nil {
