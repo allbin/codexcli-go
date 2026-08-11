@@ -8,16 +8,17 @@ import (
 
 // TestThreadItem_CommandActions exercises the full unmarshal → accessor path
 // a consumer takes: decode a commandExecution item and read its parsed
-// intents. Covers every action shape codex emits (read/search/update/unknown).
+// intents. Uses the current wire key ("command") and covers every action
+// shape codex 0.147 emits (read/listFiles/search/unknown).
 func TestThreadItem_CommandActions(t *testing.T) {
 	const raw = `{
 		"id": "c1",
 		"type": "commandExecution",
 		"commandActions": [
-			{"type":"read","path":"foo.txt","cmd":"cat foo.txt"},
-			{"type":"search","query":"TODO","path":"src","cmd":"rg TODO src"},
-			{"type":"update","path":"a.go"},
-			{"type":"unknown","cmd":"go test ./..."}
+			{"type":"read","name":"foo.txt","path":"foo.txt","command":"cat foo.txt"},
+			{"type":"listFiles","path":"src","command":"ls src"},
+			{"type":"search","query":"TODO","path":"src","command":"rg TODO src"},
+			{"type":"unknown","command":"go test ./..."}
 		]
 	}`
 	var item ThreadItem
@@ -25,13 +26,34 @@ func TestThreadItem_CommandActions(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	want := []CommandAction{
-		{Type: "read", Path: "foo.txt", Cmd: "cat foo.txt"},
-		{Type: "search", Query: "TODO", Path: "src", Cmd: "rg TODO src"},
-		{Type: "update", Path: "a.go"},
-		{Type: "unknown", Cmd: "go test ./..."},
+		{Type: "read", Name: "foo.txt", Path: "foo.txt", Command: "cat foo.txt", Cmd: "cat foo.txt"},
+		{Type: "listFiles", Path: "src", Command: "ls src", Cmd: "ls src"},
+		{Type: "search", Query: "TODO", Path: "src", Command: "rg TODO src", Cmd: "rg TODO src"},
+		{Type: "unknown", Command: "go test ./...", Cmd: "go test ./..."},
 	}
 	if got := item.CommandActions(); !reflect.DeepEqual(got, want) {
 		t.Errorf("CommandActions() = %#v, want %#v", got, want)
+	}
+}
+
+// TestCommandAction_LegacyCmdKey pins the back-compat path: transcripts
+// recorded against codex <=0.13x carry "cmd" instead of "command", and both
+// fields must end up populated either way.
+func TestCommandAction_LegacyCmdKey(t *testing.T) {
+	got := ParseCommandActions(json.RawMessage(`[{"type":"unknown","cmd":"ls -la"}]`))
+	want := []CommandAction{{Type: "unknown", Command: "ls -la", Cmd: "ls -la"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy cmd key = %#v, want %#v", got, want)
+	}
+
+	// Marshalling always emits the current key, including for a value a
+	// caller built by setting only the deprecated field.
+	out, err := json.Marshal(CommandAction{Type: "unknown", Cmd: "ls -la"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(out) != `{"type":"unknown","command":"ls -la"}` {
+		t.Errorf("marshal = %s, want the \"command\" key", out)
 	}
 }
 
@@ -48,6 +70,7 @@ func TestParseCommandActions(t *testing.T) {
 		{"not-an-array", `{"type":"read"}`, nil},
 		{"malformed", `[`, nil},
 		{"single", `[{"type":"read","path":"a"}]`, []CommandAction{{Type: "read", Path: "a"}}},
+		{"element type mismatch", `[{"type":123}]`, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,18 +97,23 @@ func TestThreadItem_CommandLiteral(t *testing.T) {
 			want: "cat foo.txt",
 		},
 		{
-			name: "falls back to first action cmd",
+			name: "falls back to first action command",
+			item: ThreadItem{CommandActionsRaw: json.RawMessage(`[{"type":"read","command":"/bin/sh -c 'ls -la'"}]`)},
+			want: "ls -la",
+		},
+		{
+			name: "falls back to legacy action cmd key",
 			item: ThreadItem{CommandActionsRaw: json.RawMessage(`[{"type":"read","cmd":"/bin/sh -c 'ls -la'"}]`)},
 			want: "ls -la",
 		},
 		{
-			name: "skips empty action cmd",
-			item: ThreadItem{CommandActionsRaw: json.RawMessage(`[{"type":"update","path":"a.go"},{"type":"unknown","cmd":"go test"}]`)},
+			name: "skips empty action command",
+			item: ThreadItem{CommandActionsRaw: json.RawMessage(`[{"type":"update","path":"a.go"},{"type":"unknown","command":"go test"}]`)},
 			want: "go test",
 		},
 		{
 			name: "empty command prefers actions",
-			item: ThreadItem{Command: strptr(""), CommandActionsRaw: json.RawMessage(`[{"type":"unknown","cmd":"echo hi"}]`)},
+			item: ThreadItem{Command: strptr(""), CommandActionsRaw: json.RawMessage(`[{"type":"unknown","command":"echo hi"}]`)},
 			want: "echo hi",
 		},
 		{
@@ -182,13 +210,13 @@ func TestFileChanges_KindRoundTrip(t *testing.T) {
 func TestApprovalParams_CommandActions(t *testing.T) {
 	const v2 = `{
 		"threadId":"t","turnId":"u","itemId":"i","startedAtMs":1,
-		"commandActions":[{"type":"read","path":"foo.txt","cmd":"cat foo.txt"}]
+		"commandActions":[{"type":"read","path":"foo.txt","command":"cat foo.txt"}]
 	}`
 	var p CommandExecutionRequestApprovalParams
 	if err := json.Unmarshal([]byte(v2), &p); err != nil {
 		t.Fatalf("unmarshal v2: %v", err)
 	}
-	want := []CommandAction{{Type: "read", Path: "foo.txt", Cmd: "cat foo.txt"}}
+	want := []CommandAction{{Type: "read", Path: "foo.txt", Command: "cat foo.txt", Cmd: "cat foo.txt"}}
 	if got := p.CommandActions(); !reflect.DeepEqual(got, want) {
 		t.Errorf("v2 CommandActions() = %#v, want %#v", got, want)
 	}
@@ -201,7 +229,7 @@ func TestApprovalParams_CommandActions(t *testing.T) {
 	if err := json.Unmarshal([]byte(legacy), &l); err != nil {
 		t.Fatalf("unmarshal legacy: %v", err)
 	}
-	wantLegacy := []CommandAction{{Type: "unknown", Cmd: "ls"}}
+	wantLegacy := []CommandAction{{Type: "unknown", Command: "ls", Cmd: "ls"}}
 	if got := l.ParsedCommandActions(); !reflect.DeepEqual(got, wantLegacy) {
 		t.Errorf("legacy ParsedCommandActions() = %#v, want %#v", got, wantLegacy)
 	}

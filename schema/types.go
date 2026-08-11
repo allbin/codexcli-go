@@ -297,20 +297,41 @@ const (
 	TurnFailed      TurnStatus = "failed"
 )
 
-// Turn is the per-turn state object. Items is empty in turn/started and
-// turn/completed notifications today; rely on item/* notifications for
-// the canonical incremental view.
+// Turn is the per-turn state object. Items carries only a display summary
+// on turn/completed (ItemsView == TurnItemsSummary) and is empty on
+// turn/started (TurnItemsNotLoaded); rely on item/* notifications for the
+// canonical incremental view.
 type Turn struct {
-	ID          string            `json:"id"`
-	Status      TurnStatus        `json:"status"`
-	Items       []ThreadItem      `json:"items"`
+	ID     string       `json:"id"`
+	Status TurnStatus   `json:"status"`
+	Items  []ThreadItem `json:"items"`
+	// Usage is no longer sent by codex app-server (removed from the Turn
+	// schema after 0.133) and is therefore always nil against a current
+	// CLI.
+	//
+	// Deprecated: subscribe to thread/tokenUsage/updated instead — see
+	// codexcli.TokenUsageUpdatedEvent.
 	Usage       *ThreadTokenUsage `json:"usage,omitempty"`
 	StartedAt   *int64            `json:"startedAt,omitempty"`
 	CompletedAt *int64            `json:"completedAt,omitempty"`
 	DurationMs  *int64            `json:"durationMs,omitempty"`
 	Error       *TurnError        `json:"error,omitempty"`
-	ItemsView   string            `json:"itemsView,omitempty"`
+	// ItemsView reports how much of Items was loaded. One of
+	// TurnItemsNotLoaded, TurnItemsSummary, TurnItemsFull.
+	ItemsView TurnItemsView `json:"itemsView,omitempty"`
 }
+
+// TurnItemsView describes how much of a Turn's Items array was populated.
+type TurnItemsView string
+
+const (
+	// TurnItemsNotLoaded means Items is intentionally empty.
+	TurnItemsNotLoaded TurnItemsView = "notLoaded"
+	// TurnItemsSummary means Items holds only a display summary.
+	TurnItemsSummary TurnItemsView = "summary"
+	// TurnItemsFull means Items holds every persisted item for the turn.
+	TurnItemsFull TurnItemsView = "full"
+)
 
 // TurnError carries the failure payload on `turn.status: "failed"` and
 // on the `error` notification mid-turn.
@@ -460,14 +481,55 @@ func (t *ThreadItem) UserMessageContent() []UserInput {
 
 // CommandAction is one entry of a commandExecution item's commandActions
 // array — codex's parsed intent for the command it intends to run. Type
-// discriminates the shape: "read"/"update" carry a Path, "search" carries
-// a Query (and usually a Path), and "unknown" carries only the literal Cmd.
-// Cmd, when present, holds the shell command codex derived the intent from.
+// discriminates the shape: "read" carries a Path plus a display Name,
+// "listFiles" carries an optional Path, "search" carries a Query (and
+// usually a Path), and "unknown" carries only the literal Command.
+// Command is present on every variant and holds the shell command codex
+// derived the intent from.
 type CommandAction struct {
-	Type  string `json:"type"`
+	Type string `json:"type"`
+	// Command is the literal shell command behind this parsed intent.
+	Command string `json:"command,omitempty"`
+	// Name is the display label carried on "read" actions.
+	Name  string `json:"name,omitempty"`
 	Path  string `json:"path,omitempty"`
 	Query string `json:"query,omitempty"`
-	Cmd   string `json:"cmd,omitempty"`
+
+	// Cmd is the pre-0.140 wire name for Command.
+	//
+	// Deprecated: use Command. Kept populated (in both directions) by
+	// UnmarshalJSON so code written against either codex generation keeps
+	// working, and so transcripts recorded before the rename still decode.
+	Cmd string `json:"-"`
+}
+
+// UnmarshalJSON accepts both the current "command" key and the legacy
+// "cmd" key, mirroring whichever is present onto both Command and Cmd.
+func (a *CommandAction) UnmarshalJSON(data []byte) error {
+	type alias CommandAction
+	var v struct {
+		alias
+		LegacyCmd string `json:"cmd,omitempty"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*a = CommandAction(v.alias)
+	if a.Command == "" {
+		a.Command = v.LegacyCmd
+	}
+	a.Cmd = a.Command
+	return nil
+}
+
+// MarshalJSON emits the current "command" key, falling back to a
+// Cmd-only value set by callers constructing actions by hand.
+func (a CommandAction) MarshalJSON() ([]byte, error) {
+	type alias CommandAction
+	if a.Command == "" {
+		a.Command = a.Cmd
+	}
+	return json.Marshal(alias(a))
 }
 
 // ParseCommandActions decodes a commandActions / parsedCmd array into typed
@@ -494,15 +556,15 @@ func (t *ThreadItem) CommandActions() []CommandAction {
 // CommandLiteral returns the human-readable command for a commandExecution
 // item, unwrapping the "<shell> -lc '…'" envelope codex wraps shell commands
 // in (see UnwrapShellCommand). It prefers the item's Command field and falls
-// back to the literal Cmd recorded on the first parsed action. Returns ""
+// back to the literal command recorded on the first parsed action. Returns ""
 // when neither is present.
 func (t *ThreadItem) CommandLiteral() string {
 	if t.Command != nil && *t.Command != "" {
 		return UnwrapShellCommand(*t.Command)
 	}
 	for _, a := range t.CommandActions() {
-		if a.Cmd != "" {
-			return UnwrapShellCommand(a.Cmd)
+		if a.Command != "" {
+			return UnwrapShellCommand(a.Command)
 		}
 	}
 	return ""
@@ -598,12 +660,26 @@ type threadResumeShape ThreadResumeParams
 // shape as ThreadStartResponse.
 type ThreadResumeResponse = ThreadStartResponse
 
-// ModelListParams is the `model/list` request payload.
-type ModelListParams struct{}
+// ModelListParams is the `model/list` request payload. All fields are
+// optional; the zero value requests the first page of visible models.
+type ModelListParams struct {
+	// Cursor is the opaque pagination cursor from a previous reply's
+	// NextCursor.
+	Cursor *string `json:"cursor,omitempty"`
+	// Limit is the page size. Nil lets the server pick.
+	Limit *int `json:"limit,omitempty"`
+	// IncludeHidden also returns models the default picker hides.
+	IncludeHidden *bool `json:"includeHidden,omitempty"`
+}
 
 // ModelListResponse is the `model/list` reply.
+//
+// Note the field is "data", not "models" — codex renamed it (and reshaped
+// the entries) between 0.133 and 0.147.
 type ModelListResponse struct {
-	Models []json.RawMessage `json:"models"`
+	Data []Model `json:"data"`
+	// NextCursor is non-nil when more pages remain.
+	NextCursor *string `json:"nextCursor,omitempty"`
 }
 
 // Notification payload types — server -> client.

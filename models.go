@@ -26,10 +26,15 @@ const (
 )
 
 // ModelInfo describes one model entry from codex's on-disk models cache.
-// The field set mirrors the codex CLI's schema as observed in codex 0.133.0.
-// New fields can be added in future codex releases without breaking callers
-// because every field is optional from the consumer's point of view —
-// unknown JSON keys are ignored and missing keys decode to zero values.
+// The field set mirrors the cache file's schema as observed in codex
+// 0.147.0. New fields can be added in future codex releases without
+// breaking callers because every field is optional from the consumer's
+// point of view — unknown JSON keys are ignored and missing keys decode to
+// zero values.
+//
+// This is the snake_case cache-file shape. The live `model/list` RPC
+// (Conn.ListModels) returns a different, camelCase projection typed as
+// schema.Model; the two are not interchangeable.
 //
 // Callers driving a model picker should filter on Visibility (typically
 // keeping only VisibilityList entries) and sort by Priority.
@@ -51,6 +56,12 @@ type ModelInfo struct {
 	ModelMessages                 *ModelMessages    `json:"model_messages,omitempty"`
 	SupportsReasoningSummaries    bool              `json:"supports_reasoning_summaries,omitempty"`
 	DefaultReasoningSummary       string            `json:"default_reasoning_summary,omitempty"`
+	ToolMode                      string            `json:"tool_mode,omitempty"`
+	MultiAgentVersion             string            `json:"multi_agent_version,omitempty"`
+	UseResponsesLite              bool              `json:"use_responses_lite,omitempty"`
+	IncludeSkillsUsageInstruction bool              `json:"include_skills_usage_instructions,omitempty"`
+	IncludePluginUsageInstruction bool              `json:"include_plugin_usage_instructions,omitempty"`
+	IncludeAppsUsageInstructions  bool              `json:"include_apps_usage_instructions,omitempty"`
 	SupportVerbosity              bool              `json:"support_verbosity,omitempty"`
 	DefaultVerbosity              string            `json:"default_verbosity,omitempty"`
 	ApplyPatchToolType            string            `json:"apply_patch_tool_type,omitempty"`
@@ -164,21 +175,42 @@ func readModelsCache(codexHomeOverride string) ([]ModelInfo, error) {
 }
 
 // ListModels queries the running app-server for the live model registry via
-// the `model/list` RPC. Unlike the package-level ListModels (which reads
-// the on-disk cache), this reflects model availability changes that have
-// occurred since the codex process started.
+// the `model/list` RPC, following pagination until the server reports no
+// more pages. Unlike the package-level ListModels (which reads the on-disk
+// cache), this reflects model availability changes that have occurred since
+// the codex process started.
 //
-// The response contains raw model objects; callers can unmarshal individual
-// entries into ModelInfo for the same typed access as the file-based version.
-func (c *Conn) ListModels(ctx context.Context) ([]json.RawMessage, error) {
+// The entries use the app-server's camelCase schema.Model shape, which is a
+// different projection from the snake_case ModelInfo in models_cache.json —
+// they are not interchangeable.
+func (c *Conn) ListModels(ctx context.Context) ([]schema.Model, error) {
+	var all []schema.Model
+	params := schema.ModelListParams{}
+	for {
+		resp, err := c.ListModelsPage(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Data...)
+		if resp.NextCursor == nil || *resp.NextCursor == "" {
+			return all, nil
+		}
+		params.Cursor = resp.NextCursor
+	}
+}
+
+// ListModelsPage issues a single `model/list` request and returns the reply
+// verbatim, including NextCursor. Use it when you want to page manually or
+// need hidden models (schema.ModelListParams.IncludeHidden).
+func (c *Conn) ListModelsPage(ctx context.Context, params schema.ModelListParams) (*schema.ModelListResponse, error) {
 	if err := c.checkExited(); err != nil {
 		return nil, err
 	}
 	var resp schema.ModelListResponse
-	if err := c.rpc.Request(ctx, "model/list", schema.ModelListParams{}, &resp); err != nil {
+	if err := c.rpc.Request(ctx, "model/list", params, &resp); err != nil {
 		return nil, c.promoteRPCError("model/list", err)
 	}
-	return resp.Models, nil
+	return &resp, nil
 }
 
 func resolveCodexHome(override string) (string, error) {
