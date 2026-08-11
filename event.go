@@ -63,6 +63,10 @@ type ItemCompletedEvent struct {
 	ThreadID string
 	TurnID   string
 	Item     schema.ThreadItem
+	// CompletedAtMs is the Unix-milliseconds timestamp the server stamped
+	// on completion. Subtract ItemStartedEvent.StartedAtMs for wall-clock
+	// duration on items that carry no DurationMs.
+	CompletedAtMs int64
 }
 
 func (*ItemCompletedEvent) event() {}

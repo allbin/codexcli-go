@@ -24,6 +24,18 @@ type InitializeCapabilities struct {
 	// notification methods for this connection. Match is exact; unknown
 	// names are accepted and ignored.
 	OptOutNotificationMethods []string `json:"optOutNotificationMethods,omitempty"`
+	// Extensions declares MCP extension settings, keyed by extension name
+	// (e.g. "openai/form"). Shapes are extension-defined.
+	Extensions map[string]any `json:"extensions,omitempty"`
+	// RequestAttestation opts into `attestation/generate` server requests.
+	// Only set it if you also register a handler for that method via
+	// codexcli.WithServerRequestHandler.
+	RequestAttestation bool `json:"requestAttestation,omitempty"`
+	// McpServerOpenaiFormElicitation is the legacy opt-in for the
+	// "openai/form" MCP extension.
+	//
+	// Deprecated: declare "openai/form" in Extensions instead.
+	McpServerOpenaiFormElicitation bool `json:"mcpServerOpenaiFormElicitation,omitempty"`
 }
 
 // InitializeParams is the `initialize` request payload (schema v1).
@@ -41,10 +53,12 @@ type InitializeResponse struct {
 }
 
 // AskForApproval is a tagged union. Simple variants are bare strings
-// ("untrusted", "on-failure", "on-request", "never"); the "granular"
-// variant is an object. RawMessage keeps both forms addressable without
-// hand-rolling every shape — callers that need the granular form can
-// unmarshal further.
+// ("untrusted", "on-request", "never"); the "granular" variant is an
+// object. RawMessage keeps both forms addressable without hand-rolling
+// every shape — callers that need the granular form can unmarshal further.
+//
+// Note "on-failure" was accepted by older codex releases and was dropped
+// from the enum; send one of the constants below instead.
 //
 // Implementation note: this is a struct wrapper rather than a named
 // alias of json.RawMessage because Go does not inherit methods through
@@ -69,8 +83,19 @@ func (a *AskForApproval) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Bare-string AskForApproval variants accepted by codex 0.147.
+const (
+	// ApprovalUntrusted prompts for anything outside the trusted-command
+	// allowlist.
+	ApprovalUntrusted = "untrusted"
+	// ApprovalOnRequest prompts only when the agent explicitly escalates.
+	ApprovalOnRequest = "on-request"
+	// ApprovalNever never prompts; blocked actions simply fail.
+	ApprovalNever = "never"
+)
+
 // AskForApprovalString returns the bare-string variant if present
-// ("untrusted", "on-failure", "on-request", "never"), or "" for the
+// (ApprovalUntrusted, ApprovalOnRequest, ApprovalNever), or "" for the
 // granular object form.
 func (a AskForApproval) AskForApprovalString() string {
 	var s string
@@ -140,12 +165,37 @@ const (
 	SandboxDangerFull     SandboxMode = "danger-full-access"
 )
 
+// ApprovalsReviewer selects who reviews approval requests. Defaults to
+// ApprovalsReviewerUser.
+type ApprovalsReviewer string
+
+const (
+	// ApprovalsReviewerUser routes approvals to the client (this SDK's
+	// ApprovalFunc).
+	ApprovalsReviewerUser ApprovalsReviewer = "user"
+	// ApprovalsReviewerAuto lets a codex subagent decide, applying a
+	// risk-based framework. The client sees the outcome via the
+	// item/autoApprovalReview/* notifications rather than an approval
+	// request.
+	ApprovalsReviewerAuto ApprovalsReviewer = "auto_review"
+)
+
+// Personality selects the assistant's conversational register. Only
+// honored by models whose Model.SupportsPersonality is true.
+type Personality string
+
+const (
+	PersonalityNone      Personality = "none"
+	PersonalityFriendly  Personality = "friendly"
+	PersonalityPragmatic Personality = "pragmatic"
+)
+
 // ThreadStartParams is the `thread/start` request payload.
 //
-// Only the fields useful for the first-pass demo are typed; the rest of
-// the server's accepted surface (collaboration mode, environments,
-// permissions profile, etc.) ride along in Extra for forward compat and
-// will be promoted to typed fields as consumers need them.
+// The commonly used surface is typed; the remainder of what the server
+// accepts (collaboration mode, environments, permissions profile, etc.)
+// rides along in Extra for forward compat and is promoted to typed fields
+// as consumers need it.
 type ThreadStartParams struct {
 	Cwd            *string         `json:"cwd,omitempty"`
 	Model          *string         `json:"model,omitempty"`
@@ -154,6 +204,19 @@ type ThreadStartParams struct {
 	Sandbox        *SandboxMode    `json:"sandbox,omitempty"`
 	Ephemeral      *bool           `json:"ephemeral,omitempty"`
 	ServiceTier    *string         `json:"serviceTier,omitempty"`
+
+	// ApprovalsReviewer overrides where approval requests are routed.
+	ApprovalsReviewer *ApprovalsReviewer `json:"approvalsReviewer,omitempty"`
+	// Personality overrides the assistant's register for the thread.
+	Personality *Personality `json:"personality,omitempty"`
+	// BaseInstructions replaces the model's built-in system prompt.
+	BaseInstructions *string `json:"baseInstructions,omitempty"`
+	// DeveloperInstructions are appended to the system prompt rather than
+	// replacing it — the right knob for per-product guidance.
+	DeveloperInstructions *string `json:"developerInstructions,omitempty"`
+	// Config overlays config.toml values for this thread only, using the
+	// same dotted-path shape as the CLI's `-c key=value`.
+	Config map[string]any `json:"config,omitempty"`
 
 	// Extra holds anything not modeled above. Merged into the JSON
 	// object on marshal; consumer-supplied keys win over typed fields.
@@ -169,21 +232,76 @@ func (p ThreadStartParams) MarshalJSON() ([]byte, error) {
 type threadStartShape ThreadStartParams
 
 // Thread is the persisted conversation object returned by
-// thread/start, thread/resume, thread/fork, and thread/read. Only the
-// fields the demo path consumes are typed.
+// thread/start, thread/resume, thread/fork, and thread/read.
 type Thread struct {
-	ID            string          `json:"id"`
-	SessionID     string          `json:"sessionId"`
-	Cwd           string          `json:"cwd"`
-	CliVersion    string          `json:"cliVersion"`
-	ModelProvider string          `json:"modelProvider"`
-	Ephemeral     bool            `json:"ephemeral"`
-	CreatedAt     int64           `json:"createdAt"`
-	UpdatedAt     int64           `json:"updatedAt"`
-	Preview       string          `json:"preview"`
-	Status        json.RawMessage `json:"status,omitempty"`
-	Name          *string         `json:"name,omitempty"`
-	Path          *string         `json:"path,omitempty"`
+	ID            string `json:"id"`
+	SessionID     string `json:"sessionId"`
+	Cwd           string `json:"cwd"`
+	CliVersion    string `json:"cliVersion"`
+	ModelProvider string `json:"modelProvider"`
+	Ephemeral     bool   `json:"ephemeral"`
+	CreatedAt     int64  `json:"createdAt"`
+	UpdatedAt     int64  `json:"updatedAt"`
+	Preview       string `json:"preview"`
+	// Status is the thread's runtime status union; read it via
+	// StatusType, or decode Status yourself for the active-flag detail.
+	Status json.RawMessage `json:"status,omitempty"`
+	Name   *string         `json:"name,omitempty"`
+	Path   *string         `json:"path,omitempty"`
+
+	// Source records which surface created the thread — one of "cli",
+	// "vscode", "exec", "appServer", "unknown", or an object for the
+	// custom/subAgent variants.
+	Source json.RawMessage `json:"source,omitempty"`
+	// ThreadSource is the optional client-supplied analytics
+	// classification passed at thread/start.
+	ThreadSource *string `json:"threadSource,omitempty"`
+	// RecencyAt is the Unix-seconds timestamp used for recency ordering,
+	// which can differ from UpdatedAt.
+	RecencyAt *int64 `json:"recencyAt,omitempty"`
+	// ForkedFromID is the source thread when this one came from
+	// thread/fork.
+	ForkedFromID *string `json:"forkedFromId,omitempty"`
+	// ParentThreadID is set only when this thread is a subagent.
+	ParentThreadID *string `json:"parentThreadId,omitempty"`
+	// AgentRole and AgentNickname are assigned to sub-agents spawned via
+	// codex's multi-agent collaboration tools.
+	AgentRole     *string `json:"agentRole,omitempty"`
+	AgentNickname *string `json:"agentNickname,omitempty"`
+	// GitInfo is the repo metadata captured at thread creation.
+	GitInfo json.RawMessage `json:"gitInfo,omitempty"`
+	// Section is the persisted section the thread currently sits in.
+	Section          json.RawMessage `json:"section,omitempty"`
+	SectionEnteredAt *int64          `json:"sectionEnteredAt,omitempty"`
+	// Turns is populated only on thread/resume, thread/rollback,
+	// thread/fork, and thread/read (with includeTurns). It is empty on
+	// thread/start.
+	Turns []Turn `json:"turns,omitempty"`
+}
+
+// ThreadStatusType values for Thread.StatusType.
+const (
+	ThreadStatusNotLoaded   = "notLoaded"
+	ThreadStatusIdle        = "idle"
+	ThreadStatusActive      = "active"
+	ThreadStatusSystemError = "systemError"
+)
+
+// StatusType returns the thread's status discriminator — one of the
+// ThreadStatus* constants — or "" when absent or unparseable.
+func (t Thread) StatusType() string { return statusType(t.Status) }
+
+func statusType(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var wrap struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &wrap) != nil {
+		return ""
+	}
+	return wrap.Type
 }
 
 // ThreadStartResponse is the `thread/start` / `thread/fork` reply.
@@ -195,10 +313,28 @@ type ThreadStartResponse struct {
 	ApprovalPolicy AskForApproval  `json:"approvalPolicy"`
 	Sandbox        json.RawMessage `json:"sandbox"`
 	ServiceTier    *string         `json:"serviceTier,omitempty"`
+
+	// ApprovalsReviewer is the reviewer in effect for this thread.
+	ApprovalsReviewer ApprovalsReviewer `json:"approvalsReviewer,omitempty"`
+	// ReasoningEffort is the effort resolved for the thread, or nil when
+	// the model has no reasoning levels.
+	ReasoningEffort *string `json:"reasoningEffort,omitempty"`
+	// InstructionSources lists the AGENTS.md-style files loaded into the
+	// system prompt for this thread.
+	InstructionSources []string `json:"instructionSources,omitempty"`
+	// RuntimeWorkspaceRoots are the directories the sandbox treats as the
+	// workspace.
+	RuntimeWorkspaceRoots []string `json:"runtimeWorkspaceRoots,omitempty"`
+	// ActivePermissionProfile is the named permission profile in effect,
+	// when one is configured.
+	ActivePermissionProfile json.RawMessage `json:"activePermissionProfile,omitempty"`
+	// MultiAgentMode is the delegation policy: "explicitRequestOnly",
+	// "proactive", or a {"custom": "..."} object.
+	MultiAgentMode json.RawMessage `json:"multiAgentMode,omitempty"`
 }
 
 // UserInput is the per-turn input union. Type discriminates: "text",
-// "image", "localImage", "skill", "mention".
+// "image", "localImage", "audio", "localAudio", "skill", "mention".
 //
 // The same union is echoed back on the server side as the content blocks
 // of a "userMessage" thread item (see ThreadItem.UserMessageContent), so
@@ -243,6 +379,14 @@ func ImageInput(url string) UserInput { return UserInput{Type: "image", URL: url
 // path readable by the codex process.
 func LocalImageInput(path string) UserInput { return UserInput{Type: "localImage", Path: path} }
 
+// AudioInput builds an "audio" input block referencing a remote URL. Only
+// accepted by models whose Model.InputModalities include "audio".
+func AudioInput(url string) UserInput { return UserInput{Type: "audio", URL: url} }
+
+// LocalAudioInput builds a "localAudio" input block referencing a file
+// path readable by the codex process.
+func LocalAudioInput(path string) UserInput { return UserInput{Type: "localAudio", Path: path} }
+
 // SkillInput builds a "skill" input block that invokes a codex skill by
 // name. Both name and path are required by the wire protocol; obtain them
 // from a SkillMetadata returned by the skills/list RPC (see
@@ -271,6 +415,23 @@ type TurnStartParams struct {
 	Effort         *string         `json:"effort,omitempty"`
 	ApprovalPolicy *AskForApproval `json:"approvalPolicy,omitempty"`
 	SandboxPolicy  json.RawMessage `json:"sandboxPolicy,omitempty"`
+
+	// ServiceTier overrides the billing/throughput tier for this turn and
+	// subsequent turns. Values come from Model.ServiceTiers.
+	ServiceTier *string `json:"serviceTier,omitempty"`
+	// ApprovalsReviewer overrides approval routing for this turn onward.
+	ApprovalsReviewer *ApprovalsReviewer `json:"approvalsReviewer,omitempty"`
+	// Personality overrides the assistant's register for this turn onward.
+	Personality *Personality `json:"personality,omitempty"`
+	// Summary overrides the reasoning-summary mode for this turn onward.
+	Summary *string `json:"summary,omitempty"`
+	// OutputSchema constrains the turn's final assistant message to a JSON
+	// Schema. Encode the schema itself, not a wrapper.
+	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
+	// ClientUserMessageID is an opaque client-side id echoed back on the
+	// resulting userMessage item as ThreadItem.ClientID, letting a UI
+	// match its optimistic render to the server's item.
+	ClientUserMessageID *string `json:"clientUserMessageId,omitempty"`
 
 	Extra map[string]any `json:"-"`
 }
@@ -356,14 +517,24 @@ type ThreadItem struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 
-	// AgentMessage / Plan fields.
+	// AgentMessage / Plan fields. Phase is agentMessage-only and reports
+	// whether the text is interim commentary or the turn's final answer
+	// (MessagePhase* constants); it is nil when the provider omits it.
 	Text  string  `json:"text,omitempty"`
 	Phase *string `json:"phase,omitempty"`
+	// MemoryCitation lists the stored memories an agentMessage drew on.
+	MemoryCitation json.RawMessage `json:"memoryCitation,omitempty"`
 
-	// UserMessage / Reasoning fields. Both item types carry a "content"
-	// array but with different element shapes; reach userMessage content
-	// via UserMessageContent(), which guards on Type.
+	// UserMessage fields. Content is also used by reasoning items with a
+	// different element shape; reach userMessage content via
+	// UserMessageContent(), which guards on Type.
 	Content json.RawMessage `json:"content,omitempty"`
+	// ClientID echoes TurnStartParams.ClientUserMessageID.
+	ClientID *string `json:"clientId,omitempty"`
+
+	// Reasoning fields. Summary holds the human-readable summary blocks;
+	// Content holds the raw reasoning text blocks (both []string).
+	Summary []string `json:"summary,omitempty"`
 
 	// CommandExecution fields. CommandActionsRaw holds the parsed-intent
 	// array verbatim; decode it via the CommandActions() accessor.
@@ -373,6 +544,14 @@ type ThreadItem struct {
 	AggregatedOutput  *string         `json:"aggregatedOutput,omitempty"`
 	Source            *string         `json:"source,omitempty"`
 	CommandActionsRaw json.RawMessage `json:"commandActions,omitempty"`
+	// ProcessID identifies the underlying PTY process, when codex ran the
+	// command through one. Pairs with the terminalInteraction
+	// notification.
+	ProcessID *string `json:"processId,omitempty"`
+	// ScriptPath and PluginID are set when the command resolves to a
+	// single trusted first-party plugin script.
+	ScriptPath *string `json:"scriptPath,omitempty"`
+	PluginID   *string `json:"pluginId,omitempty"`
 
 	// FileChange fields.
 	Changes json.RawMessage `json:"changes,omitempty"`
@@ -384,12 +563,34 @@ type ThreadItem struct {
 	McpResult json.RawMessage `json:"result,omitempty"`
 	McpError  json.RawMessage `json:"error,omitempty"`
 	Namespace *string         `json:"namespace,omitempty"`
+	// ReadOnlyHint mirrors the MCP tool's own read-only advertisement —
+	// useful for deciding whether a call needs an approval prompt.
+	ReadOnlyHint *bool `json:"readOnlyHint,omitempty"`
+	// AppContext carries the MCP app resource backing this call.
+	AppContext json.RawMessage `json:"appContext,omitempty"`
+
+	// DynamicToolCall fields.
+	Success      *bool           `json:"success,omitempty"`
+	ContentItems json.RawMessage `json:"contentItems,omitempty"`
+
+	// WebSearch fields. Action describes the specific browse step
+	// (search / openPage / findInPage); Results is opaque JSON.
+	Query   string          `json:"query,omitempty"`
+	Action  json.RawMessage `json:"action,omitempty"`
+	Results json.RawMessage `json:"results,omitempty"`
+
+	// Path is the viewed image on an imageView item.
+	Path *string `json:"path,omitempty"`
+	// Review is the review name on enteredReviewMode / exitedReviewMode.
+	Review *string `json:"review,omitempty"`
 
 	// Shared fields across tool-like items.
 	Status     *string `json:"status,omitempty"`
 	DurationMs *int64  `json:"durationMs,omitempty"`
 
 	// Raw preserves the full JSON for future-typing and forward compat.
+	// Item shapes not projected above (hookPrompt, collabAgentToolCall,
+	// subAgentActivity, imageGeneration) are reachable here.
 	Raw json.RawMessage `json:"-"`
 }
 
@@ -403,7 +604,54 @@ const (
 	ItemTypeFileChange       = "fileChange"
 	ItemTypeMcpToolCall      = "mcpToolCall"
 	ItemTypeDynamicToolCall  = "dynamicToolCall"
+	// Item types added in codex 0.14x.
+	ItemTypeHookPrompt          = "hookPrompt"
+	ItemTypeCollabAgentToolCall = "collabAgentToolCall"
+	ItemTypeSubAgentActivity    = "subAgentActivity"
+	ItemTypeWebSearch           = "webSearch"
+	ItemTypeImageView           = "imageView"
+	ItemTypeImageGeneration     = "imageGeneration"
+	ItemTypeSleep               = "sleep"
+	ItemTypeEnteredReviewMode   = "enteredReviewMode"
+	ItemTypeExitedReviewMode    = "exitedReviewMode"
+	ItemTypeContextCompaction   = "contextCompaction"
 )
+
+// MessagePhase values for ThreadItem.Phase on agentMessage items.
+// Providers do not emit these consistently — treat a nil Phase as
+// "unknown" rather than assuming commentary.
+const (
+	MessagePhaseCommentary  = "commentary"
+	MessagePhaseFinalAnswer = "final_answer"
+)
+
+// CommandExecutionSource values for ThreadItem.Source.
+const (
+	CommandSourceAgent                  = "agent"
+	CommandSourceUserShell              = "userShell"
+	CommandSourceUnifiedExecStartup     = "unifiedExecStartup"
+	CommandSourceUnifiedExecInteraction = "unifiedExecInteraction"
+)
+
+// Item status values shared by commandExecution, fileChange, mcpToolCall,
+// and dynamicToolCall items. "declined" only occurs on the first two.
+const (
+	ItemStatusInProgress = "inProgress"
+	ItemStatusCompleted  = "completed"
+	ItemStatusFailed     = "failed"
+	ItemStatusDeclined   = "declined"
+)
+
+// ReasoningContent returns the raw reasoning text blocks of a "reasoning"
+// item. Returns nil for other item types or on parse error.
+func (t *ThreadItem) ReasoningContent() []string {
+	if t.Type != ItemTypeReasoning || len(t.Content) == 0 {
+		return nil
+	}
+	var out []string
+	_ = json.Unmarshal(t.Content, &out)
+	return out
+}
 
 // UnmarshalJSON keeps both the typed projection and the raw bytes.
 func (t *ThreadItem) UnmarshalJSON(data []byte) error {
@@ -600,6 +848,9 @@ type TokenUsageBreakdown struct {
 	CachedInputTokens     int64 `json:"cachedInputTokens"`
 	OutputTokens          int64 `json:"outputTokens"`
 	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+	// CacheWriteInputTokens counts input tokens written into the prompt
+	// cache (billed separately from CachedInputTokens reads).
+	CacheWriteInputTokens int64 `json:"cacheWriteInputTokens"`
 }
 
 // ThreadTokenUsage is the top-level usage snapshot emitted by the server
@@ -624,6 +875,15 @@ type CreditsSnapshot struct {
 	Balance    *string `json:"balance,omitempty"`
 }
 
+// SpendControlLimitSnapshot describes a per-user spend cap. Limit and Used
+// are decimal currency amounts as strings.
+type SpendControlLimitSnapshot struct {
+	Limit            string `json:"limit"`
+	Used             string `json:"used"`
+	RemainingPercent int    `json:"remainingPercent"`
+	ResetsAt         int64  `json:"resetsAt"`
+}
+
 // RateLimitSnapshot is the aggregate rate-limit payload from
 // account/rateLimits/updated.
 type RateLimitSnapshot struct {
@@ -634,6 +894,12 @@ type RateLimitSnapshot struct {
 	LimitID              *string          `json:"limitId,omitempty"`
 	LimitName            *string          `json:"limitName,omitempty"`
 	RateLimitReachedType *string          `json:"rateLimitReachedType,omitempty"`
+	// IndividualLimit is the caller's personal spend cap within a
+	// workspace, when one is configured.
+	IndividualLimit *SpendControlLimitSnapshot `json:"individualLimit,omitempty"`
+	// SpendControlReached is the backend-reported spend-control state.
+	// nil means "unavailable", not "not reached".
+	SpendControlReached *bool `json:"spendControlReached,omitempty"`
 }
 
 // ThreadResumeParams is the `thread/resume` request payload.
@@ -645,6 +911,12 @@ type ThreadResumeParams struct {
 	ApprovalPolicy *AskForApproval `json:"approvalPolicy,omitempty"`
 	Sandbox        *SandboxMode    `json:"sandbox,omitempty"`
 	ServiceTier    *string         `json:"serviceTier,omitempty"`
+
+	ApprovalsReviewer     *ApprovalsReviewer `json:"approvalsReviewer,omitempty"`
+	Personality           *Personality       `json:"personality,omitempty"`
+	BaseInstructions      *string            `json:"baseInstructions,omitempty"`
+	DeveloperInstructions *string            `json:"developerInstructions,omitempty"`
+	Config                map[string]any     `json:"config,omitempty"`
 
 	Extra map[string]any `json:"-"`
 }
@@ -709,6 +981,9 @@ type ItemCompletedNotification struct {
 	ThreadId string     `json:"threadId"`
 	TurnId   string     `json:"turnId"`
 	Item     ThreadItem `json:"item"`
+	// CompletedAtMs is the Unix-milliseconds timestamp when the item's
+	// lifecycle ended. Pairs with ItemStartedNotification.StartedAtMs.
+	CompletedAtMs int64 `json:"completedAtMs"`
 }
 
 type AgentMessageDeltaNotification struct {

@@ -590,6 +590,7 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 			}
 			c.deliver(p.ThreadId, &ItemCompletedEvent{
 				ThreadID: p.ThreadId, TurnID: p.TurnId, Item: p.Item,
+				CompletedAtMs: p.CompletedAtMs,
 			})
 		}
 	case "item/agentMessage/delta":
@@ -667,6 +668,89 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		// Empty payload; no decode needed. Broadcast as an invalidation
 		// signal so consumers caching skills/list output can refresh.
 		c.broadcastEvent(&SkillsChangedEvent{})
+	case schema.MethodThreadStatusChanged:
+		var p schema.ThreadStatusChangedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ThreadStatusChangedEvent{
+				ThreadID: p.ThreadId, Status: p.StatusType(), StatusRaw: p.Status,
+			})
+		}
+	case schema.MethodTurnPlanUpdated:
+		var p schema.TurnPlanUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &TurnPlanUpdatedEvent{ThreadID: p.ThreadId, TurnID: p.TurnId, Plan: p.Plan}
+			if p.Explanation != nil {
+				ev.Explanation = *p.Explanation
+			}
+			c.deliver(p.ThreadId, ev)
+		}
+	case schema.MethodFileChangePatchUpdated:
+		var p schema.FileChangePatchUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &FileChangePatchUpdatedEvent{
+				ThreadID: p.ThreadId, TurnID: p.TurnId, ItemID: p.ItemId, Changes: p.Changes,
+			})
+		}
+	case schema.MethodReasoningSummaryPartAdded:
+		var p schema.ReasoningSummaryPartAddedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ReasoningSummaryPartAddedEvent{
+				ThreadID: p.ThreadId, TurnID: p.TurnId, ItemID: p.ItemId,
+				SummaryIndex: p.SummaryIndex,
+			})
+		}
+	case schema.MethodThreadCompacted:
+		var p schema.ContextCompactedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ContextCompactedEvent{ThreadID: p.ThreadId, TurnID: p.TurnId})
+		}
+	case schema.MethodModelRerouted:
+		var p schema.ModelReroutedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadId, &ModelReroutedEvent{
+				ThreadID: p.ThreadId, TurnID: p.TurnId,
+				FromModel: p.FromModel, ToModel: p.ToModel, ReasonRaw: p.Reason,
+			})
+		}
+	case schema.MethodMcpServerStatusUpdated:
+		var p schema.McpServerStatusUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &McpServerStatusEvent{Name: p.Name, Status: p.Status}
+			if p.ThreadId != nil {
+				ev.ThreadID = *p.ThreadId
+			}
+			if p.Error != nil {
+				ev.Err = *p.Error
+			}
+			// Server startup is not thread-scoped in practice — codex
+			// reports the same server per thread — so broadcast rather
+			// than drop it when ThreadId is absent.
+			c.broadcastEvent(ev)
+		}
+	case schema.MethodWarning, schema.MethodGuardianWarning:
+		var p schema.WarningNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &WarningEvent{Message: p.Message, Guardian: method == schema.MethodGuardianWarning}
+			if p.ThreadId != nil {
+				ev.ThreadID = *p.ThreadId
+			}
+			if ev.ThreadID != "" {
+				c.deliver(ev.ThreadID, ev)
+			} else {
+				c.broadcastEvent(ev)
+			}
+		}
+	case schema.MethodDeprecationNotice:
+		var p schema.DeprecationNoticeNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &DeprecationNoticeEvent{Summary: p.Summary}
+			if p.Details != nil {
+				ev.Details = *p.Details
+			}
+			c.logger.Warn("codexcli: codex deprecation notice",
+				"summary", ev.Summary, "details", ev.Details)
+			c.broadcastEvent(ev)
+		}
 	case "error":
 		var p schema.ErrorNotification
 		if err := json.Unmarshal(params, &p); err == nil {

@@ -136,6 +136,9 @@ func (o *options) callOpts() []Option {
 	if o.approval != nil {
 		out = append(out, WithApprovalPolicy(*o.approval))
 	}
+	if o.approvalsReviewer != nil {
+		out = append(out, WithApprovalsReviewer(*o.approvalsReviewer))
+	}
 	if o.turnExtra != nil {
 		out = append(out, WithTurnExtra(o.turnExtra))
 	}

@@ -17,13 +17,15 @@ type options struct {
 	caps       *schema.InitializeCapabilities
 
 	// thread bootstrapping
-	cwd           string
-	model         string
-	modelProvider string
-	approval      *schema.AskForApproval
-	sandbox       *schema.SandboxMode
-	threadExtra   map[string]any
-	ephemeral     *bool
+	cwd               string
+	model             string
+	modelProvider     string
+	approval          *schema.AskForApproval
+	approvalsReviewer *schema.ApprovalsReviewer
+	sandbox           *schema.SandboxMode
+	threadExtra       map[string]any
+	ephemeral         *bool
+	devInstructions   string
 
 	// turn defaults
 	effort    string
@@ -108,6 +110,29 @@ func WithModelProvider(provider string) Option {
 // WithExperimentalAPI).
 func WithApprovalPolicy(policy schema.AskForApproval) Option {
 	return func(o *options) { o.approval = &policy }
+}
+
+// WithApprovalsReviewer chooses who reviews approval requests for the
+// thread. The default (schema.ApprovalsReviewerUser) routes them to the
+// handler registered with WithApprovalHandler.
+//
+// schema.ApprovalsReviewerAuto hands the decision to a codex subagent
+// instead: the SDK's ApprovalFunc then stops firing for the delegated
+// requests, and the outcome arrives as item/autoApprovalReview/*
+// notifications, which currently surface as *UnknownEvent.
+func WithApprovalsReviewer(reviewer schema.ApprovalsReviewer) Option {
+	return func(o *options) { o.approvalsReviewer = &reviewer }
+}
+
+// WithDeveloperInstructions appends product-specific guidance to the
+// model's system prompt for every thread started with these options.
+//
+// This is the additive knob. To replace codex's built-in instructions
+// outright, set "baseInstructions" via WithThreadExtra instead — that
+// discards the tool-use guidance codex relies on, so it is rarely what
+// you want.
+func WithDeveloperInstructions(instructions string) Option {
+	return func(o *options) { o.devInstructions = instructions }
 }
 
 // WithSandbox sets the legacy thread-level sandbox shorthand.
@@ -248,10 +273,15 @@ func resolveOptions(defaults []Option, overrides []Option) *options {
 
 func (o *options) buildThreadStartParams() schema.ThreadStartParams {
 	p := schema.ThreadStartParams{
-		ApprovalPolicy: o.approval,
-		Sandbox:        o.sandbox,
-		Ephemeral:      o.ephemeral,
-		Extra:          o.threadExtra,
+		ApprovalPolicy:    o.approval,
+		ApprovalsReviewer: o.approvalsReviewer,
+		Sandbox:           o.sandbox,
+		Ephemeral:         o.ephemeral,
+		Extra:             o.threadExtra,
+	}
+	if o.devInstructions != "" {
+		v := o.devInstructions
+		p.DeveloperInstructions = &v
 	}
 	if o.cwd != "" {
 		v := o.cwd
@@ -270,10 +300,15 @@ func (o *options) buildThreadStartParams() schema.ThreadStartParams {
 
 func (o *options) buildThreadResumeParams(threadID string) schema.ThreadResumeParams {
 	p := schema.ThreadResumeParams{
-		ThreadId:       threadID,
-		ApprovalPolicy: o.approval,
-		Sandbox:        o.sandbox,
-		Extra:          o.threadExtra,
+		ThreadId:          threadID,
+		ApprovalPolicy:    o.approval,
+		ApprovalsReviewer: o.approvalsReviewer,
+		Sandbox:           o.sandbox,
+		Extra:             o.threadExtra,
+	}
+	if o.devInstructions != "" {
+		v := o.devInstructions
+		p.DeveloperInstructions = &v
 	}
 	if o.cwd != "" {
 		v := o.cwd
@@ -313,6 +348,9 @@ func (o *options) buildTurnStartParams(threadID string, input []schema.UserInput
 	}
 	if o.approval != nil {
 		p.ApprovalPolicy = o.approval
+	}
+	if o.approvalsReviewer != nil {
+		p.ApprovalsReviewer = o.approvalsReviewer
 	}
 	return p
 }
