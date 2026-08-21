@@ -42,11 +42,95 @@ The adapter's capability list is mostly wrong in the conservative direction. Fiv
 | MidTurnSendMessage unsupported | **Unimplemented, not a limit** | `turn/steer` injects into the running turn. So does `turn/start` while a turn is active `[live]` |
 | No compaction events | **Wrong** | `contextCompaction` item is what 0.148 emits; `thread/compacted` still exists but is deprecated `[live]` |
 | Fork unsupported | **Unimplemented, not a limit** | `thread/fork`, with `lastTurnId` / `beforeTurnId` truncation `[live]` |
-| ToolProgressTicks unsupported | **Partly a limit** | `item/mcpToolCall/progress` exists for MCP calls only; no generic per-tool tick `[schema]` |
+| ToolProgressTicks unsupported | **Unimplemented, not a limit** | `item/mcpToolCall/progress` covers MCP calls; for everything else claudecli-go *synthesizes* ticks from a ticker rather than waiting for the CLI — see parity section |
 | MaxTurns unsupported | **Genuine limit, but see `tokenBudget`** | No turn cap exists anywhere. `thread/goal/set` does offer a token budget with a `budgetLimited` terminal state `[schema]` |
 
 Coverage today: **8 of 144 client request methods**, **27 of 74 server notifications**,
 **7 of 11 server requests**.
+
+---
+
+## Parity with claudecli-go
+
+`codexcli-go` mirrors `claudecli-go`'s public API so consumers can swap by changing the
+import path, so that library — not the protocol — sets the target. Every gap below is scored
+against what `claudecli-go` already does.
+
+### Capability parity
+
+`runtime.Capabilities` as advertised by each adapter (`runtime/cli/claude/adapter.go:168`,
+`runtime/cli/codex/connector.go:239`):
+
+| Capability | claude | codex | Verdict | Path |
+| --- | :-: | :-: | --- | --- |
+| `Thinking` | yes | no | **Free — flag is simply wrong** | Reasoning items and deltas are already dispatched (`client.go:622-639`). Nothing to build |
+| `CompactionEvents` | yes | no | **Achievable** | `contextCompaction` item (C) |
+| `MidTurnSendMessage` | yes | no | **Achievable** | `turn/steer` (D) |
+| `Fork` | yes | no | **Achievable** | `thread/fork` (E) |
+| `ToolProgressTicks` | yes | no | **Achievable — synthesize** | Ticker, not protocol — see behaviour 2 below |
+| `Subagents` | yes | no | **Achievable** | Child threads (B); blocked on the drop |
+| `PlanMode` | yes | no | **Achievable, needs `experimentalApi`** | `thread/settings/update{collaborationMode}` `[live]` |
+| `MaxBudget` | yes | no | **Achievable** | `thread/goal/set{tokenBudget}` (E) |
+| `MaxTurns` | yes | no | **Genuine limit** | No turn cap exists (E) |
+| `Workflows` | yes | no | **Genuine limit** | Codex has no workflow concept `[schema]` |
+| `AcceptEditsMode` | yes | no | **Unclear** | Codex has approval policies and named permission profiles, but no direct analogue `[unverified]` |
+| `GranularPermissions` | no | yes | codex-only | — |
+| `SandboxModes` | no | yes | codex-only | — |
+| `Effort`, `PartialMessageStream`, `InteractivePermissions`, `AskUserQuestion`, `Resume`, `RateLimitEvents`, `Ping` | yes | yes | at parity | — |
+
+Eight of the eleven missing capabilities are reachable. Two are real limits. One is unclear.
+
+### This changes the `experimentalApi` recommendation
+
+Section A concludes the flag is unnecessary — that holds for the *protocol* gaps, but not for
+parity. `thread/settings/update` is the only route to a mid-session model switch, effort
+change, or plan mode, and it is fully gated `[live]`:
+
+```
+stable                thread/settings/update requires experimentalApi capability
+experimentalApi=true  OK {}                   (effort, model, collaborationMode, approvalPolicy)
+```
+
+`claudecli-go` exposes all three as ordinary methods (`SetModel`, `SetPermissionMode`,
+`SetMaxThinkingTokens`), and agentkit declares `ModelSwitchable` and `PlanModeCapable`
+sub-interfaces for them. **To reach parity, `experimentalApi` has to be on by default.**
+
+### Four behaviours to copy, not just methods
+
+The interesting parity is behavioural. `claudecli-go` has already solved four problems that
+show up here in a different costume.
+
+**1. Orphan routing instead of dropping.** `claudecli-go` hit the same class of bug — events
+arriving with no consumer scoped to receive them — and fixed it with a router (`router.go`):
+unroutable events go to a bounded, drop-oldest orphan mailbox, drained via
+`Session.DrainOrphans() []OrphanEvent`, with `RouterStats.OrphansDropped` counting losses.
+The router never blocks the pump, and the whole thing is opt-in via `EnableRouting()` so
+existing semantics are untouched.
+
+That is the right answer to the child-thread drop (B): child-thread notifications are
+precisely "arrived outside any active subscriber". Mirroring the existing pattern also gives
+consumers one mental model across both libraries.
+
+**2. Synthesize tool progress; don't wait for the CLI.** `claudecli-go` emits *two* progress
+types: `CLIToolProgressEvent` forwarded from the stream, and `ToolProgressEvent` that the SDK
+generates from its own ticker whenever the session sits in `ActivityAwaitingToolResult`,
+carrying `Elapsed` so consumers can render "Bash running for 4m 12s" without doing the
+arithmetic.
+
+Codex gives us the same state: an `item/started` for a `commandExecution` / `mcpToolCall` /
+`fileChange` with no matching `item/completed`. So `ToolProgressTicks` is not a protocol
+limit at all — it is a ticker we have not written. This corrects the report's earlier reading.
+
+**3. Backfill sparse fields onto later events.** `TaskEvent` documents it explicitly: the CLI
+sends `TaskType` and `WorkflowName` only on `task_started`, and the SDK copies them onto that
+task's later events. Codex needs exactly this — `agentPath` and the spawning tool-call id
+arrive once on `subAgentActivity`, and every later child event carries only a bare `threadId`.
+
+**4. Name the mid-turn path after its semantics.** `claudecli-go` splits `Query` (tracked,
+one result) from `SendMessage` (untracked, callable mid-turn, folded into the current turn).
+Codex's `turn/start` and `turn/steer` map onto that split almost exactly — including the
+detail that a mid-turn `turn/start` folds into the running turn rather than starting a new
+one `[live]`.
 
 ---
 
@@ -90,10 +174,15 @@ and `resolveOptions` omits the whole `capabilities` block unless something opted
 (`option.go:265`). So the default is off. t3code sends `experimentalApi: true`
 unconditionally in `buildCodexInitializeParams` `[t3code]`.
 
-**Recommendation**: nothing on Agentique's roadmap needs the flag today — child threads,
-`turn/steer`, `thread/fork` and compaction are all in the stable set. Leave the default off.
-It becomes necessary if you want `thread/queue/*` (a real pending-message queue, see D) or
-`thread/turns/list`.
+**Recommendation**: **turn it on by default.** None of the *protocol* gaps need it — child
+threads, `turn/steer`, `thread/fork` and compaction are all stable — but `claudecli-go`
+parity does. `thread/settings/update` is gated, and it is the only route to a mid-session
+model switch, effort change, or plan mode `[live]`. It also unlocks `thread/queue/*` (a real
+pending-message queue, see D) and `thread/turns/list`. See the parity section.
+
+The cost of turning it on is that gated *fields* start being accepted where they were
+previously rejected, which is a behaviour change for callers that were relying on the
+rejection. In practice that is only the granular `askForApproval` form.
 
 ---
 
@@ -363,9 +452,15 @@ Two adjacent history operations: `thread/rollback { threadId, numTurns }` is sta
 deprecated — calling it emits a `deprecationNotice` notification saying so `[live]` — and its
 replacement `thread/revert { threadId, beforeTurnId }` is behind `experimentalApi` `[schema]`.
 
-### Tool progress — partly a real limit
+### Tool progress — not a limit once you copy claudecli-go
 
-There is no generic per-tool progress tick. What exists `[schema]`:
+The protocol has no generic per-tool tick. That does not make the capability unreachable:
+`claudecli-go` generates its `ToolProgressEvent` from an SDK-side ticker while the session
+sits in `ActivityAwaitingToolResult`, and only forwards the CLI's own ticks as a separate
+`CLIToolProgressEvent`. Codex exposes the same "tool started, not yet completed" state, so
+the tick is ours to synthesize. See the parity section.
+
+What the wire does provide `[schema]`:
 
 | Notification | Scope |
 | --- | --- |
@@ -375,8 +470,7 @@ There is no generic per-tool progress tick. What exists `[schema]`:
 | `command/exec/outputDelta`, `process/outputDelta` | Client-driven exec, outside the turn loop |
 
 The library handles the two `outputDelta` methods and `patchUpdated`, and **not**
-`item/mcpToolCall/progress`. So "ToolProgressTicks unsupported" is accurate for built-in
-tools and wrong for MCP tools.
+`item/mcpToolCall/progress`.
 
 `[unverified]`: I did not drive an MCP tool call that emits progress, so the notification's
 delivery cadence is unconfirmed. The type is confirmed.
@@ -523,9 +617,10 @@ union `[schema]`, so `approval.go` is not carrying dead branches.
 
 ## Ranked backlog
 
-Ordered by value to a session orchestrator. Signatures follow this repo's conventions:
+Ordered by parity value against `claudecli-go`. Signatures follow this repo's conventions —
 `Conn` methods take `ctx` first, thread-scoped operations hang off `*Thread`, wire unions stay
-`json.RawMessage` behind typed accessors.
+`json.RawMessage` behind typed accessors — and mirror `claudecli-go`'s naming wherever the two
+libraries are solving the same problem.
 
 ### 1. Child-thread visibility (subagent roster)
 
@@ -533,24 +628,38 @@ Unblocks a Codex agent roster in Agentique. Everything else on this list is smal
 
 Three separable pieces:
 
-**1a. Stop dropping child traffic.** `Conn.deliver` needs a fallback for unknown thread ids
-instead of a silent `return`. Options: a connection-level subscriber, or auto-registering a
-child on first sight.
+**1a. Stop dropping child traffic — mirror `claudecli-go`'s router.** `Conn.deliver` returns
+silently when no subscriber matches the thread id (`client.go:521`). `claudecli-go` solved the
+same class of bug in `router.go` and the shape transfers directly: a bounded, drop-oldest
+orphan mailbox that never blocks the read loop, drained on demand, with dropped events
+counted rather than lost quietly.
 
 ```go
-// WithChildThreadEvents delivers notifications for threads this client did
-// not create — Codex subagents run as sibling threads on the same connection.
-// Without it they are dropped.
-func WithChildThreadEvents(enabled bool) Option
+// EnableRouting turns on orphan capture for notifications addressed to
+// threads this Conn has no subscriber for — Codex subagents run as sibling
+// threads on the same connection. Opt-in, so existing Stream semantics are
+// unchanged. Mirrors claudecli-go's Session.EnableRouting.
+func (c *Conn) EnableRouting()
 
-// ChildThreadEvent wraps a notification addressed to a thread other than the
-// subscriber's own. Kind is the wire method.
-type ChildThreadEvent struct {
-    ParentThreadID string // "" until the spawn is correlated
-    ThreadID       string
-    Inner          Event
+// DrainOrphans returns and clears captured orphan events, oldest first.
+func (c *Conn) DrainOrphans() []OrphanEvent
+
+// RouterStats reports drop counters. OrphansDropped is non-zero when the
+// mailbox overflowed — a fleet outran the consumer.
+func (c *Conn) RouterStats() RouterStats
+
+// OrphanEvent is an event addressed to a thread with no subscriber,
+// together with its arrival stamp. ThreadID is always set (unlike
+// claudecli-go's, where the scope is a query generation).
+type OrphanEvent struct {
+    Event     Event
+    ThreadID  string
+    ArrivedAt time.Time
 }
 ```
+
+Prefer this over a bespoke `WithChildThreadEvents` option: it fixes every unroutable event,
+not just subagents, and it keeps one mental model across the two libraries.
 
 **1b. Project the two roster items.** Both are `Raw`-only today.
 
@@ -583,9 +692,51 @@ type CollabAgentToolCall struct {
 }
 ```
 
-**1c. Fleet-aware interrupt.** Must exist for Stop to work at all during a fleet.
+**1c. A `TaskEvent` equivalent.** `claudecli-go` folds the whole subagent lifecycle into one
+event type with a `Subtype` discriminator, which is what agentkit's `runtime.SubagentEvent`
+is shaped for. Codex can fill nearly all of it, so emit the same shape rather than a
+codex-specific one:
 
 ```go
+// TaskEvent reports a Codex subagent's lifecycle. Mirrors
+// claudecli-go.TaskEvent so agentkit maps both providers identically.
+//
+// Codex subagents are sibling threads: TaskID is the child's threadId and
+// ToolUseID is the parent tool call that spawned it. AgentPath and
+// ToolUseID arrive once, on the spawning subAgentActivity item, and are
+// backfilled onto the task's later events.
+type TaskEvent struct {
+    Subtype     string // "task_started" | "task_progress" | "task_notification"
+    TaskID      string // child threadId
+    ToolUseID   string // subAgentActivity.id ("call_…")
+    ThreadID    string // parent threadId
+    Description string // agentPath, or agentRole/agentNickname when known
+    Status      string // child ThreadStatus discriminator
+    TotalTokens int    // child thread/tokenUsage/updated
+    DurationMs  int    // child turn timings
+}
+```
+
+| `claudecli-go` field | Codex source |
+| --- | --- |
+| `Subtype` | `subAgentActivity.kind` + child `turn/completed` |
+| `TaskID` | child `threadId` |
+| `ToolUseID` | `subAgentActivity.id` — a model tool-call id, the direct analogue of Claude's `ParentToolUseID` |
+| `Description` / `SubagentType` | `agentPath` (`/root/alpha`); `agentRole` / `agentNickname` via `thread/read` |
+| `Status` | child `thread/status/changed` |
+| `TotalTokens` | child `thread/tokenUsage/updated` |
+| `DurationMs` | child `turn/started` → `turn/completed` |
+| `Prompt`, `ToolUses` | **not fillable** — `collabAgentToolCall.prompt` was null in both captures `[live]` |
+
+**1d. Fleet-aware interrupt.** `claudecli-go` has `StopTask(taskID)` alongside `Interrupt()`,
+so per-subagent stop is already part of the shared vocabulary. Codex needs both, plus the
+ordering rule.
+
+```go
+// StopTask interrupts a single subagent thread by its task id (the child's
+// threadId). Mirrors claudecli-go.Session.StopTask.
+func (t *Thread) StopTask(ctx context.Context, taskID string) error
+
 // InterruptTree interrupts every live child turn spawned under t, then t's
 // own turn. Child interrupts are bounded by perChild and by the ctx
 // deadline; a wedged child never blocks the parent interrupt.
@@ -615,33 +766,56 @@ func (c *Conn) ListChildThreads(ctx context.Context, threadID string, recursive 
 Implementation note: buffer notifications from unknown thread ids for a beat. The child's
 first `thread/status/changed` reliably precedes the `subAgentActivity` that names it.
 
-### 2. `turn/steer` — mid-turn injection
+### 2. `SendMessage` — mid-turn injection over `turn/steer`
 
-Removes Agentique's buffer-and-replay emulation entirely.
+Removes Agentique's buffer-and-replay emulation entirely. Name it after `claudecli-go`'s
+`Session.SendMessage`, whose doc already describes codex's behaviour exactly: *"Unlike Query,
+it can be called while another query is in progress… The CLI folds injected messages into the
+current turn's result."*
 
 ```go
-// Steer injects input into the turn already running on t, without waiting
-// for an idle boundary. It fails if turnID is not the active turn — pass
-// t.ActiveTurnID() unless you are guarding against a race. The returned id
-// is the same running turn, not a new one.
-func (t *Thread) Steer(ctx context.Context, turnID string, input []schema.UserInput) (string, error)
+// SendMessage injects a user message into the turn already running on t,
+// without waiting for an idle boundary. Unlike StartTurn it does not start
+// or track a turn — codex folds the message into the turn in flight and
+// returns that same turn's id. Mirrors claudecli-go.Session.SendMessage.
+//
+// Returns ErrTurnNotSteerable when the active turn is a review or
+// compaction turn, which codex refuses to steer; buffering until idle is
+// the correct fallback there, and only there.
+func (t *Thread) SendMessage(ctx context.Context, prompt string) (string, error)
+func (t *Thread) SendMessageWithInput(ctx context.Context, input []schema.UserInput) (string, error)
 ```
 
-Pair it with a doc comment on `StartTurn` warning that a mid-turn call merges into the
-running turn `[live]` rather than starting a new one.
+The `turnID` is read from `t.ActiveTurnID()` internally and passed as `expectedTurnId`, so
+callers get `claudecli-go`'s signature rather than a protocol detail. Pair it with a doc
+comment on `StartTurn` warning that a mid-turn call folds into the running turn `[live]`
+rather than starting a new one — the same distinction `claudecli-go` draws between `Query`
+and `SendMessage`.
 
-### 3. Compaction as an item
+### 3. Compaction events
 
-Small, and the current typing is actively misleading.
+Small, and the current typing is actively misleading. `claudecli-go` splits this into a
+status transition and a boundary marker; codex supplies both halves.
 
 ```go
-// ContextCompaction reports that codex compacted the thread's context.
-// codex 0.148 delivers this as a contextCompaction item inside a synthetic
-// turn; the older thread/compacted notification is deprecated.
-type ContextCompactionEvent struct {
+// CompactStatusEvent reports compaction starting or clearing. Status is
+// "compacting" on the contextCompaction item/started, "" on item/completed.
+// Mirrors claudecli-go.CompactStatusEvent.
+type CompactStatusEvent struct {
     ThreadID string
-    TurnID   string
-    ItemID   string
+    Status   string
+}
+
+// CompactBoundaryEvent marks the compaction boundary. Trigger is "manual"
+// when the client called Compact, "auto" otherwise. PreTokens is the last
+// thread/tokenUsage/updated total before the boundary.
+// Mirrors claudecli-go.CompactBoundaryEvent.
+type CompactBoundaryEvent struct {
+    ThreadID  string
+    TurnID    string
+    Trigger   string
+    PreTokens int
+    Raw       json.RawMessage
 }
 
 // Compact asks codex to compact the thread's context now. Compaction runs
@@ -649,9 +823,23 @@ type ContextCompactionEvent struct {
 func (t *Thread) Compact(ctx context.Context) error
 ```
 
+Keep the existing `ContextCompactedEvent` for the deprecated `thread/compacted` notification;
+it costs nothing and older codex builds may still emit it.
+
 ### 4. `thread/fork`
 
+`claudecli-go` models fork as a *resume modifier* — `WithForkSession()` appends
+`--fork-session` at spawn (`option.go:149`) — not as a standalone call. Codex's `thread/fork`
+is a separate RPC, but the ergonomics should match: forking is something you do *while
+resuming*, so the option form is the parity surface. Expose the direct call too, since codex
+supports truncation that Claude does not.
+
 ```go
+// WithForkSession makes ResumeThread branch the thread instead of
+// continuing it, leaving the original untouched. Mirrors
+// claudecli-go.WithForkSession.
+func WithForkSession() Option
+
 // ForkThread branches threadID into a new thread carrying its history.
 // The result's ForkedFromID records provenance; ParentThreadID stays nil —
 // a fork is not a subagent.
@@ -664,7 +852,68 @@ func ForkBeforeTurn(turnID string) ForkOption
 func ForkThroughTurn(turnID string) ForkOption
 ```
 
-### 5. History and session listing
+### 5. `thread/settings/update` — three capabilities in one method
+
+Delivers `PlanMode`, agentkit's `ModelSwitchable`, and mid-session effort changes at once.
+Requires `experimentalApi` `[live]`. `claudecli-go` has each of these as a plain method, so
+the parity surface is a family, not one call.
+
+```go
+// SetModel switches the model for subsequent turns.
+// Mirrors claudecli-go.Session.SetModel.
+func (t *Thread) SetModel(ctx context.Context, model string) error
+
+// SetEffort changes reasoning effort for subsequent turns.
+func (t *Thread) SetEffort(ctx context.Context, effort string) error
+
+// SetPlanMode selects the "plan" or "default" collaboration mode for
+// subsequent turns. Closest analogue to
+// claudecli-go.Session.SetPermissionMode(PermissionModePlan).
+func (t *Thread) SetPlanMode(ctx context.Context, plan bool) error
+
+// SetApprovalPolicy overrides the approval policy for subsequent turns.
+func (t *Thread) SetApprovalPolicy(ctx context.Context, policy schema.AskForApproval) error
+
+// ListCollaborationModes returns the server's mode presets (Plan, Default),
+// each with its own model and reasoning-effort defaults.
+func (c *Conn) ListCollaborationModes(ctx context.Context) ([]schema.CollaborationModeMask, error)
+```
+
+All five verified to return `OK` against a live thread with `experimentalApi: true` `[live]`.
+
+### 6. Tool progress — the ticker plus the MCP passthrough
+
+Two events, exactly as `claudecli-go` splits them.
+
+```go
+// ToolProgressEvent is emitted periodically by this library — not by codex —
+// while a tool item is started but not completed. It proves liveness and
+// carries elapsed time so consumers can render "Bash running for 4m 12s".
+// ItemID / ToolName identify the first pending tool item and stay stable
+// across ticks. Mirrors claudecli-go.ToolProgressEvent.
+type ToolProgressEvent struct {
+    ThreadID string
+    ItemID   string
+    ToolName string
+    Elapsed  time.Duration
+    At       time.Time
+}
+
+// McpToolProgressEvent corresponds to `item/mcpToolCall/progress` and comes
+// from codex itself. Message is a human-readable status string; there is no
+// numeric progress. Mirrors claudecli-go.CLIToolProgressEvent.
+type McpToolProgressEvent struct {
+    ThreadID, TurnID, ItemID, Message string
+}
+```
+
+The ticker needs an activity state to drive it. `claudecli-go` derives one
+(`ActivityIdle` / `ActivityThinking` / `ActivityAwaitingToolResult`) and emits
+`CLIStateChangeEvent` on transitions. Codex hands us the equivalent for free in
+`thread/status/changed`, which the library already dispatches — so the state machine is
+mostly a matter of tracking outstanding tool items.
+
+### 7. History and session listing
 
 Needed for any UI that shows sessions it did not create.
 
@@ -676,20 +925,10 @@ func (c *Conn) ArchiveThread(ctx context.Context, threadID string) error
 func (c *Conn) DeleteThread(ctx context.Context, threadID string) error
 ```
 
-Plus the `thread/name/updated` notification — codex renames threads on its own, so a cached
-title goes stale.
+`SetThreadName` mirrors `claudecli-go.Session.RenameSession`. Add the `thread/name/updated`
+notification too — codex renames threads on its own, so a cached title goes stale.
 
-### 6. MCP tool progress
-
-```go
-// McpToolProgressEvent corresponds to `item/mcpToolCall/progress`. Message
-// is a human-readable status string; there is no numeric progress.
-type McpToolProgressEvent struct {
-    ThreadID, TurnID, ItemID, Message string
-}
-```
-
-### 7. Thread goals as a cost ceiling
+### 8. Thread goals as a cost ceiling
 
 The nearest thing the protocol has to `MaxTurns` (E), and `goals` is default-on.
 
@@ -709,19 +948,19 @@ type GoalUpdatedEvent struct {
 }
 ```
 
-### 8. Guardian and hook lifecycle
+### 9. Guardian and hook lifecycle
 
 `guardian_approval` and `hooks` are both stable and default-on `[live]`, and their
 notifications currently land as `UnknownEvent`: `item/autoApprovalReview/started`,
 `item/autoApprovalReview/completed`, `hook/started`, `hook/completed`. A turn that stalls in
 auto-approval review looks like a hang without them.
 
-### 9. `serverRequest/resolved`
+### 10. `serverRequest/resolved`
 
 Tells the client a pending server request was answered by someone else. Without it a UI can
 leave an approval prompt on screen forever. Cheap.
 
-### 10. Everything else
+### 11. Everything else
 
 `review/start`, `thread/shellCommand`, `thread/inject_items`, the `fs/*` and `command/exec`
 families, plugins, marketplace, accounts. None of it is on Agentique's path today.
