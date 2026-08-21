@@ -31,6 +31,14 @@ codex app-server generate-json-schema --experimental --out /tmp/schema-exp
 The diff between those two `--out` directories is the exact set of methods gated behind
 `experimentalApi`.
 
+The two live captures this report leans on are committed, scrubbed, so the claims stay
+checkable without re-running a paid fleet:
+
+| Fixture | What it proves |
+| --- | --- |
+| `testdata/multi_agent_wire.json` | Two-child subagent fleet (B). Children emit no `thread/started`; their first frame precedes the parent's `subAgentActivity` |
+| `testdata/steer_compact_wire.json` | `turn/steer` folding into the running turn (D), and compaction arriving as a `contextCompaction` item rather than `thread/compacted` (C) |
+
 ## Executive summary
 
 The adapter's capability list is mostly wrong in the conservative direction. Five of the six
