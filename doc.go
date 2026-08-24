@@ -25,6 +25,12 @@
 // previously persisted thread, and Thread.StartTurn for multi-turn
 // conversations.
 //
+// Environment: DetectInstall reports which codex binary would be spawned,
+// how it was installed, and the command that updates that install — offline,
+// read-only, and reporting InstallUnknown with no command rather than
+// guessing. Doctor projects `codex doctor --json` into a typed struct and is
+// deliberately kept separate because it touches the network.
+//
 // Models: ListModels reads the codex CLI's on-disk model cache
 // ($CODEX_HOME/models_cache.json) and returns []ModelInfo. Conn.ListModels
 // queries the running server via the model/list RPC for live availability

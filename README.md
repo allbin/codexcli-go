@@ -94,6 +94,67 @@ for _, m := range models {
 
 **The two registries are different shapes.** The cache file uses snake_case and is typed as `codexcli.ModelInfo` (`Slug`, `Visibility`, `Priority`); the RPC uses camelCase and is typed as `schema.Model` (`ID`, `Hidden`, `IsDefault`). They are not interchangeable — do not unmarshal one into the other.
 
+## Which codex will I run, and how do I update it?
+
+`DetectInstall` reports the codex binary that would actually be spawned, how it was installed, and the command that updates *that* install. It is offline and read-only: `exec.LookPath` + `filepath.EvalSymlinks`, package metadata next to the resolved path, codex's standalone-install symlink under `CODEX_HOME`, and one `codex --version`. No subprocess beyond the version probe, no network, no session.
+
+```go
+info, err := codexcli.DetectInstall(ctx)
+if errors.Is(err, codexcli.ErrCLINotFound) {
+    // No codex installed — a normal state, not a failure.
+}
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("%s (%s, %s)\n", info.RealPath, info.Version, info.Method)
+if info.UpdateCmd != "" {
+    fmt.Printf("update with: %s\n", info.UpdateCmd)
+} else {
+    fmt.Println("update manually — no command is known to be correct here")
+}
+```
+
+**Never treat an empty `UpdateCmd` as "use npm".** Running `npm install -g @openai/codex` against a standalone install writes a *second* complete copy into an npm prefix; whichever copy `PATH` reaches first then answers `codex --version`, so the user is told a version that does not describe the binary their next session runs — and the copy they actually use is still stale. That failure is silent, which is why `InstallUnknown` with no command is the correct answer whenever the evidence is inconclusive.
+
+Update commands were verified against codex 0.148.0 by running `codex update` over synthetic layouts in a throwaway container:
+
+| `Method` | Layout | `UpdateCmd` |
+|---|---|---|
+| `InstallNative` | `$CODEX_HOME/packages/standalone/releases/<v>` | `codex update` — re-runs the standalone installer |
+| `InstallNPMGlobal` | a `node_modules/@openai/codex` tree | `npm install -g` / `pnpm add -g` / `bun install -g …@latest`, per `PackageManager` |
+| `InstallPackageManager` | Homebrew cask, winget, mise | `brew upgrade --cask codex`, `winget upgrade OpenAI.Codex`, `mise upgrade codex` (asdf: none) |
+| `InstallVersionManager` | an fnm/nvm/volta root, no package metadata | none — the version manager owns the directory |
+| `InstallUnknown` | anything else, including a bare binary in a bin dir | none — `codex update` refuses these too |
+
+Two codex-specific wrinkles worth knowing:
+
+- **The binary on `PATH` is not the binary that runs.** For an npm install, `PATH` points at a JS wrapper (`…/@openai/codex/bin/codex.js`) that spawns a vendored musl binary four directories deeper, under `…/node_modules/@openai/codex-linux-x64/vendor/…/bin/codex`. Both walk up to a `package.json` naming `@openai/codex` — the platform sub-package is an npm alias of the same name — so that shared ancestor, not any single directory name, is the primary classifier and both entry points classify identically.
+- **`VersionManager` is set even for npm installs.** A global npm install hosted by fnm or nvm only updates for the node version currently active.
+
+`ConfigMismatch` flags the dangerous state: a standalone install exists under `CODEX_HOME` that `PATH` does not reach, so updating the copy you found leaves the copy that runs untouched.
+
+### `Doctor` — codex's own account, and it touches the network
+
+`Doctor` shells out to `codex doctor --json` and returns a typed `*DoctorReport`. Keep it separate from `DetectInstall` in your head: it lets the CLI do everything it does, including a provider WebSocket handshake and a registry lookup for the published version — ~1.4s wall clock on a healthy machine, however long the timeouts take on a broken one. A launch-time probe wants `DetectInstall`; a "diagnose my install" button wants this.
+
+```go
+report, err := codexcli.Doctor(ctx)
+if err != nil {
+    log.Fatal(err) // errors.Is(err, codexcli.ErrDoctorFailed) for "could not run it"
+}
+fmt.Println(report.OverallStatus, report.CodexVersion)
+fmt.Println("published:", report.Updates.LatestVersion, report.Updates.LatestVersionStatus)
+if len(report.Installation.PathEntries) > 1 {
+    fmt.Println("more than one codex on PATH:", report.Installation.PathEntries)
+}
+```
+
+Checks failing is a *successful* diagnosis — it comes back as a non-`ok` `OverallStatus`, not an error. `ErrDoctorFailed` means the command could not be run or printed nothing parseable.
+
+**Only the top level of the payload is structured.** Each check's `details` is a map of display label to display value, so every key the typed projections read can be renamed by a codex release that never bumps `schemaVersion`. `DoctorReport.Installation` and `.Updates` therefore degrade to zero values rather than guess, and `DoctorReport.SchemaSupported` reports whether they were filled in at all; `DoctorReport.Checks` always holds the payload verbatim. `GeneratedAt` is kept as a string because codex 0.148.0 emits `"1787550860s since unix epoch"`, not RFC 3339.
+
+`Installation.PathEntries` is the one to surface: more than one copy on `PATH` is exactly the state where a version number stops describing the binary that runs.
+
 ## Skills
 
 Unlike Claude Code — which pushes a flat list of skill names on its init event — codex does not advertise skills at thread start. Discovery is an explicit pull via the `skills/list` RPC, so call `Conn.ListSkills` when you actually need the list (e.g. to populate a picker), not on every connect.
@@ -221,6 +282,8 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `thread.go` | `Thread` — start additional turns on the same conversation. |
 | `approval.go` | Sealed `ApprovalRequest` / `ApprovalDecision` interfaces, typed approval routing. |
 | `models.go` | `ListModels` (file-based) and `Conn.ListModels` (live RPC). |
+| `install.go` | `DetectInstall` — offline, read-only classification of the codex binary on `PATH` and the command that updates it. |
+| `doctor.go` | `Doctor` — typed projection of `codex doctor --json`. Touches the network; keep it off the launch path. |
 | `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
 | `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
