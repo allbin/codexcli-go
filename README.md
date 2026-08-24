@@ -7,10 +7,10 @@ Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC
 ## Install
 
 ```
-go get github.com/allbin/codexcli-go@<commit-SHA>
+go get github.com/allbin/codexcli-go@v0.1.0
 ```
 
-Pre-1.0 — consumers pin commit SHAs, no release tags. Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
+Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md). Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
 
 ## Quick start
 
