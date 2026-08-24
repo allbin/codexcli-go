@@ -31,6 +31,15 @@
 // guessing. Doctor projects `codex doctor --json` into a typed struct and is
 // deliberately kept separate because it touches the network.
 //
+// Install lifecycle: LatestPublished answers "am I behind?" in one HTTP
+// request, with a three-state verdict that says "no verdict" rather than
+// comparing an install against a release stream it does not follow. Update
+// runs codex's own updater for a standalone install, refuses every other
+// method with the command to show the user, and verifies the outcome by
+// re-reading the version rather than trusting the exit code. The three are
+// priced differently on purpose — offline, one request, and minutes — so a
+// consumer can schedule around the cost.
+//
 // Models: ListModels reads the codex CLI's on-disk model cache
 // ($CODEX_HOME/models_cache.json) and returns []ModelInfo. Conn.ListModels
 // queries the running server via the model/list RPC for live availability

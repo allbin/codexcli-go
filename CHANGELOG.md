@@ -15,6 +15,107 @@ or pin a specific version (e.g. `@v0.1.0`).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
+Closes the last asymmetry with `claudecli-go`, which shipped these two in
+v0.6.0/v0.7.0. Additive: nothing existing changed shape.
+
+`SDKVersion` is `0.2.0` (was `0.1.0`). It is sent as
+`initialize.params.clientInfo.version` and is now also the User-Agent
+`LatestPublished` identifies itself with.
+
+### Added
+
+- **`Update`** — runs codex's own updater for the install on PATH, and reports
+  what actually happened.
+
+  Verified end-to-end against codex 0.148.0 → 0.149.1 on a synthetic standalone
+  install in a sandboxed `CODEX_HOME`: the real installer ran, the version
+  moved, `Changed` came back true.
+
+  Four things it refuses to get wrong, each of them learned rather than
+  designed:
+
+  - **Only the standalone install is updated from here.** Every other method
+    comes back as `*ManualUpdateError` carrying `InstallInfo.UpdateCmd`
+    **verbatim** — a normal outcome, and the common one in the wild. An empty
+    `Command` means "tell the user to update manually" and must never be filled
+    in with a guess. This is narrower than `codex update` itself, which also
+    shells out to `npm install -g @openai/codex` for a node-managed install:
+    codex reports `managed package root` and `npm update target` separately
+    because they can differ, and when they do that "update" writes a second
+    copy whose visibility depends on PATH order.
+
+  - **It executes the PATH entry** recorded by detection, never the bare word
+    `codex` (a second `exec.LookPath` can reach a different copy — `Doctor`
+    reports two on an ordinary machine) and never the symlink-resolved path
+    (which is the very release the update supersedes).
+
+  - **Success is verified by re-reading the version, never by the exit code.**
+    `codex update` was observed exiting 0 and printing "Update ran
+    successfully!" while the command it shells out to was not installed at all.
+    `VersionBefore`/`VersionAfter`/`Changed` are the answer; `ExitCode` is
+    diagnostics.
+
+  - **A writability preflight** returns `ErrUpdateNotWritable` before anything
+    runs, because "cannot" and "tried and failed" render differently: one never
+    offers the button, the other shows an error after a click. It probes the two
+    directories the installer actually writes —
+    `<CODEX_HOME>/packages/standalone/releases` and `$CODEX_INSTALL_DIR`
+    (default `~/.local/bin`) — neither of which is necessarily the directory
+    holding the binary on PATH.
+
+  The result is returned **alongside** the error, never instead of it: a
+  half-run update still has before/after numbers worth rendering.
+
+  Surface: `Update(ctx, opts...)`, `(*Client).Update`, `UpdateResult`,
+  `WithUpdateProgress` (plain-text lines, one per line the installer prints),
+  `WithUpdateOutput`, `WithUpdateTimeout`, `ErrManualUpdate` /
+  `ManualUpdateError`, `ErrUpdateNotWritable` / `UpdateNotWritableError`,
+  `ErrUpdateFailed` / `UpdateFailedError`.
+
+- **`LatestPublished`** — the published version for an install's own release
+  stream, in one HTTP request.
+
+  `Doctor` already answers this, but spends a CLI spawn, DNS and a WebSocket to
+  the model provider (~1.2s) getting there. This reads the registry or release
+  feed directly, chosen from the detected install: the npm registry's dist-tags
+  for node-managed installs (never `npm view` — a server has no npm on PATH),
+  codex's own `releases.openai.com/codex/channels/latest` for standalone with
+  the GitHub releases API as the mirror the installer also accepts, and the
+  Homebrew cask API for brew. Everything else returns `ErrPublishedUnknown`.
+
+  **The verdict is three states, not a bool.** `Published.Status` is `behind`,
+  `current`, or unknown — and unknown is the zero value, so a half-built result
+  cannot read as good news. `Status.Known()` gates anything reassuring, and
+  `StatusReason` says why there is no verdict. `Version` is reported either way,
+  because "what is published?" stays a fair question when "am I behind?" has no
+  honest answer. `claudecli-go` shipped a bare `UpdateAvailable bool` in v0.6.0
+  and had to fix it in v0.7.0; the codex-specific version of that trap is the
+  `alpha`/`beta` dist-tags, where semver would happily call a prerelease install
+  "behind" a release it never tracked.
+
+  `ErrPublishedUnknown` means "no trustworthy source for this install, and no
+  substitute would be correct" — never "the lookup failed". A DNS failure or a
+  503 is an ordinary wrapped error, because that one is worth retrying and this
+  one never is.
+
+  Surface: `LatestPublished(ctx, opts...)`, `(*Client).LatestPublished`,
+  `Published`, `VersionStatus` (`VersionStatusUnknown`, `VersionStatusCurrent`,
+  `VersionStatusBehind`) with `Known()`, `PublishedSource`,
+  `ErrPublishedUnknown` / `PublishedUnknownError`, `WithPublishedHTTPClient`,
+  `WithPublishedTimeout`.
+
+### Notes for consumers
+
+- `agentkit` maps these onto `InstallUpdatable` / `UpdateInstall` and
+  `PublishedVersionReportable` / `PublishedVersion`. Its `manual` and `blocked`
+  outcomes are `ErrManualUpdate` and `ErrUpdateNotWritable`; its `unverified` is
+  a non-nil result with an empty `VersionAfter`.
+- Tests need no codex on PATH: classification stays pure and the ambient
+  operations (writability probe, updater exec, version probe, HTTP client) are
+  injected, mirroring `claudecli-go`'s `updateEnv` / `installEnv`.
+
 ## [0.1.0] - 2026-08-24
 
 First tagged release. Earlier consumers pinned commit SHAs; pin `@v0.1.0` from
@@ -126,5 +227,6 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/allbin/codexcli-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/allbin/codexcli-go/releases/tag/v0.1.0

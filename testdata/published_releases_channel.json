@@ -1,0 +1,15 @@
+{
+  "assets": [
+    {
+      "name": "argument-comment-lint",
+      "digest": "sha256:9b8088a1163e52d45b0f68fe9e155f6b2b56028053baea48922b8eb23de4981b",
+      "browser_download_url": "https://releases.openai.com/codex/releases/0.149.1/argument-comment-lint"
+    },
+    {
+      "name": "argument-comment-lint-aarch64-apple-darwin.tar.gz",
+      "digest": "sha256:c65108519ec657a2a9602410088c979bf37dc5cd3a595c1af100ab12bb0cd68b",
+      "browser_download_url": "https://releases.openai.com/codex/releases/0.149.1/argument-comment-lint-aarch64-apple-darwin.tar.gz"
+    }
+  ],
+  "tag_name": "rust-v0.149.1"
+}

@@ -155,6 +155,68 @@ Checks failing is a *successful* diagnosis — it comes back as a non-`ok` `Over
 
 `Installation.PathEntries` is the one to surface: more than one copy on `PATH` is exactly the state where a version number stops describing the binary that runs.
 
+### `LatestPublished` — am I behind, in one HTTP request
+
+`Doctor` answers this too, but spends a CLI spawn, DNS and a provider WebSocket getting there. `LatestPublished` reads the release feed directly, choosing it from the detected install.
+
+```go
+pub, err := codexcli.LatestPublished(ctx)
+if errors.Is(err, codexcli.ErrPublishedUnknown) {
+    // No trustworthy source for this install. A correct answer, not a failure —
+    // and not worth retrying, unlike a DNS failure or a 503.
+}
+if err == nil {
+    fmt.Printf("%s is published (%s)\n", pub.Version, pub.Source)
+    if pub.Status.Known() {
+        fmt.Println("you are", pub.Status) // "behind" or "current"
+    } else {
+        fmt.Println("no verdict:", pub.StatusReason)
+    }
+}
+```
+
+| `Method` | Source | Endpoint |
+|---|---|---|
+| `InstallNPMGlobal` | `npm-registry` | the `latest` dist-tag for `@openai/codex` — over HTTP, never `npm view` (a server has no npm on PATH) |
+| `InstallNative` | `release-channel`, else `github-releases` | `releases.openai.com/codex/channels/latest`, falling back to the GitHub releases API the standalone installer also accepts for the same release |
+| `InstallPackageManager` (Homebrew) | `homebrew-cask` | `formulae.brew.sh/api/cask/<cask>.json` — the cask decides what a brew install tracks, so there is no channel to report |
+| everything else | — | `ErrPublishedUnknown`: borrowing npm's number for a version-manager install would be a wrong answer dressed as a right one |
+
+**The verdict is three states, not a bool.** `Status` is `behind`, `current`, or unknown, and unknown is the zero value so a half-built result cannot read as good news. It is unknown when either version could not be read or parsed, and when the installed version is a **prerelease**: npm publishes `alpha` and `beta` dist-tags alongside `latest`, and semver would happily call `0.149.0-alpha.4.3` "behind" `0.149.1` — a release it was never following. `Version` is reported in every one of those cases, because "what is published?" stays a fair question when "am I behind?" has no honest answer.
+
+## Updating the install
+
+`Update` runs codex's own updater and tells you what actually happened.
+
+```go
+res, err := codexcli.Update(ctx, codexcli.WithUpdateProgress(func(line string) {
+    fmt.Println(line) // "==> Downloading Codex CLI", one live line at a time
+}))
+
+var manual *codexcli.ManualUpdateError
+switch {
+case errors.As(err, &manual):
+    // Not ours to update. A normal outcome, and the common one.
+    // manual.Command is verbatim and may be empty — never fill it in.
+case errors.Is(err, codexcli.ErrUpdateNotWritable):
+    // Cannot, as opposed to tried and failed: don't offer the button at all.
+case err != nil:
+    // res is still non-nil here: a half-run update has numbers worth showing.
+}
+if res != nil && res.Changed {
+    fmt.Printf("%s → %s\n", res.VersionBefore, res.VersionAfter)
+}
+```
+
+Four things it deliberately will not get wrong:
+
+- **Only the standalone install is updated from here.** Everything else comes back as `*ManualUpdateError` carrying `InstallInfo.UpdateCmd` verbatim. This is narrower than `codex update` itself, which also shells out to `npm install -g @openai/codex` for a node-managed install — but codex reports `managed package root` and `npm update target` as separate facts precisely because they can differ, and when they do, that "update" writes a second copy whose visibility depends on `PATH` order.
+- **It executes the `PATH` entry** detection recorded — not the bare word `codex` (a second `exec.LookPath` can reach a different copy), and not the resolved path (that is the release the update is about to supersede).
+- **Success is verified by re-reading the version, never by the exit code.** `codex update` was observed exiting 0 and printing "Update ran successfully!" while the command it shells out to was not installed at all. Believe `Changed`, not `ExitCode`.
+- **A writability preflight runs first**, over the two directories the installer actually writes — `<CODEX_HOME>/packages/standalone/releases` and `$CODEX_INSTALL_DIR` (default `~/.local/bin`). Neither is necessarily the directory holding the binary on `PATH`.
+
+Verified end-to-end against codex 0.148.0 → 0.149.1 on a sandboxed `CODEX_HOME`: the real installer ran, the version moved, `Changed` came back true.
+
 ## Skills
 
 Unlike Claude Code — which pushes a flat list of skill names on its init event — codex does not advertise skills at thread start. Discovery is an explicit pull via the `skills/list` RPC, so call `Conn.ListSkills` when you actually need the list (e.g. to populate a picker), not on every connect.
@@ -284,6 +346,8 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `models.go` | `ListModels` (file-based) and `Conn.ListModels` (live RPC). |
 | `install.go` | `DetectInstall` — offline, read-only classification of the codex binary on `PATH` and the command that updates it. |
 | `doctor.go` | `Doctor` — typed projection of `codex doctor --json`. Touches the network; keep it off the launch path. |
+| `published.go` | `LatestPublished` — the published version for an install's own release stream, in one HTTP request. Three-state verdict; never compares across streams. |
+| `update.go` | `Update` — runs codex's own updater for a standalone install, refuses the rest with the command to display, and verifies by re-reading the version. |
 | `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
 | `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
