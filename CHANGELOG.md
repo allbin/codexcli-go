@@ -15,6 +15,49 @@ or pin a specific version (e.g. `@v0.1.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **`Conn.AccountRateLimits(ctx)`** — reads the rate-limit snapshot on demand
+  via `account/rateLimits/read`, returning the same `*schema.RateLimitSnapshot`
+  that `RateLimitsUpdatedEvent` carries.
+
+  The event only fires while a turn is running, so anything built on it goes
+  blank when the connection is idle. This is the pull counterpart: it works on
+  a connection that has never started a thread, which is what a usage
+  indicator needs.
+
+  Verified end-to-end against codex 0.148.0 on a live ChatGPT account with no
+  thread open: both windows, plan type, credits and spend-control state came
+  back populated.
+
+- **`Conn.Account(ctx)`** — reads the signed-in account via `account/read`.
+  Returns the new `*schema.Account`, a union discriminated on `Type`
+  (`chatgpt` / `apiKey` / `amazonBedrock`); `Email` and `PlanType` are
+  populated for `chatgpt` only. It never asks the server to refresh
+  credentials.
+
+- **`ErrMethodNotSupported`** — returned by both reads when the app-server
+  does not implement the method, so a consumer degrades the feature to
+  "unavailable" instead of reporting a failure.
+
+  codex rejects an unrecognised method while deserializing its request union,
+  so it answers `-32600 "Invalid request: unknown variant ..."` rather than
+  the JSON-RPC spec's `-32601`. Classification matches both, plus the
+  `requires experimentalApi capability` gate — and deliberately does *not*
+  match a plain `-32600` for malformed params, which stays a real error.
+
+- **`ErrNotSignedIn`** — returned by `Conn.Account` when the server reports a
+  null account, rather than a nil-nil return the caller has to remember to
+  check.
+
+- **`schema.AccountRateLimitsReadResponse`** models the full reply, including
+  the per-`limitId` bucket map and the reset-credit block. Neither is surfaced
+  on `Conn` yet; the reset-credit shape stays `json.RawMessage` because it is
+  still moving between codex releases.
+
+- **`BidiFixtureExecutor.SendErrorResponse`** for scripting server-side
+  rejections in tests.
+
 ## [0.2.0] - 2026-08-24
 
 Closes the last asymmetry with `claudecli-go`, which shipped these two in

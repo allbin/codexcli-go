@@ -148,6 +148,16 @@ func (e *BidiFixtureExecutor) SendRawResponse(id json.RawMessage, result json.Ra
 	return writeRPCFrame(e.ServerWriter, rpcFrame{ID: id, Result: result})
 }
 
+// SendErrorResponse writes an error response for the given request id.
+// Use it to script server-side rejections — an unknown method, a malformed
+// param — that a test needs the client to classify.
+func (e *BidiFixtureExecutor) SendErrorResponse(id json.RawMessage, code int, message string) error {
+	return writeRPCFrame(e.ServerWriter, rpcFrame{
+		ID:    id,
+		Error: &rpcFrameError{Code: code, Message: message},
+	})
+}
+
 // SendRequest writes a server-initiated request (e.g. an approval) and
 // returns the id used so the test can later match the response.
 func (e *BidiFixtureExecutor) SendRequest(id json.RawMessage, method string, params any) error {

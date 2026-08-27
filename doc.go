@@ -40,6 +40,14 @@
 // priced differently on purpose — offline, one request, and minutes — so a
 // consumer can schedule around the cost.
 //
+// Account: Conn.AccountRateLimits and Conn.Account read rate-limit and
+// sign-in state on demand, without a thread. They are the pull counterpart
+// to RateLimitsUpdatedEvent, which the server only pushes mid-turn, so a
+// usage indicator can render on an idle connection. Both report
+// ErrMethodNotSupported when the app-server lacks the method, and Account
+// reports ErrNotSignedIn when nobody is logged in — the two "nothing to
+// show" outcomes, distinct from a failure.
+//
 // Models: ListModels reads the codex CLI's on-disk model cache
 // ($CODEX_HOME/models_cache.json) and returns []ModelInfo. Conn.ListModels
 // queries the running server via the model/list RPC for live availability

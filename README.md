@@ -94,6 +94,42 @@ for _, m := range models {
 
 **The two registries are different shapes.** The cache file uses snake_case and is typed as `codexcli.ModelInfo` (`Slug`, `Visibility`, `Priority`); the RPC uses camelCase and is typed as `schema.Model` (`ID`, `Hidden`, `IsDefault`). They are not interchangeable — do not unmarshal one into the other.
 
+## Account and rate limits
+
+`RateLimitsUpdatedEvent` only fires while a turn is running, so a usage indicator built on the event stream goes blank the moment nothing is happening. `Conn.AccountRateLimits` is the pull version: it works on a connection that has never started a thread.
+
+```go
+conn, _ := client.Connect(ctx)
+defer conn.Close()
+
+snap, err := conn.AccountRateLimits(ctx)   // no thread needed
+switch {
+case errors.Is(err, codexcli.ErrMethodNotSupported):
+    // Older codex — render the indicator as "unavailable", not as an error.
+case err != nil:
+    return err
+default:
+    fmt.Printf("5h window: %d%% used, resets at %v\n", snap.Primary.UsedPercent, *snap.Primary.ResetsAt)
+}
+```
+
+The returned `*schema.RateLimitSnapshot` is the same type `RateLimitsUpdatedEvent` carries, so seed from this call on connect and keep refreshing from the event stream during a turn. Each read costs a round trip to OpenAI's backend on the server side — poll it, don't call it per render.
+
+`Conn.Account` reports who codex is signed in as. It never refreshes credentials.
+
+```go
+acct, err := conn.Account(ctx)
+if errors.Is(err, codexcli.ErrNotSignedIn) {
+    // Nobody logged in — prompt for `codex login`.
+}
+// acct.Type is "chatgpt" | "apiKey" | "amazonBedrock"; Email and PlanType
+// are populated for chatgpt only.
+```
+
+Both reads return `ErrMethodNotSupported` when the app-server does not implement the method, so a consumer can degrade the feature rather than treat it as a failure. codex rejects an unknown method while deserializing its request union, which surfaces as `-32600 "unknown variant ..."` rather than the spec's `-32601` — the classification handles both.
+
+`Conn.AccountRateLimits` returns the server's backward-compatible single-bucket view. The full reply also carries a per-`limitId` map and a reset-credit block; those decode into `schema.AccountRateLimitsReadResponse` but are not surfaced on `Conn` because nothing needs them yet.
+
 ## Which codex will I run, and how do I update it?
 
 `DetectInstall` reports the codex binary that would actually be spawned, how it was installed, and the command that updates *that* install. It is offline and read-only: `exec.LookPath` + `filepath.EvalSymlinks`, package metadata next to the resolved path, codex's standalone-install symlink under `CODEX_HOME`, and one `codex --version`. No subprocess beyond the version probe, no network, no session.

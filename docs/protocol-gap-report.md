@@ -513,18 +513,19 @@ enforcement behaviour on exhaustion is unconfirmed.
 
 ## Full inventory
 
-### Client requests — 8 of 144
+### Client requests — 10 of 144
 
 Everything not listed as supported is **missing** (no Go entry point, no types). Nothing is
 partially supported at the request level.
 
 **Supported**: `initialize`, `model/list`, `skills/list`, `skills/config/write`,
-`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`.
+`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`, `account/read`,
+`account/rateLimits/read`.
 
-**Missing, stable (90)**:
+**Missing, stable (88)**:
 
 `account/login/cancel`, `account/login/start`, `account/logout`,
-`account/rateLimitResetCredit/consume`, `account/rateLimits/read`, `account/read`,
+`account/rateLimitResetCredit/consume`,
 `account/sendAddCreditsNudgeEmail`, `account/usage/read`, `account/workspaceMessages/read`,
 `app/installed`, `app/list`, `app/read`, `command/exec`, `command/exec/resize`,
 `command/exec/terminate`, `command/exec/write`, `config/batchWrite`,
