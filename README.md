@@ -372,7 +372,8 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 |---|---|
 | `client.go` | `Client`, `Conn` — spawn codex, run the handshake, dispatch requests, route notifications to per-thread subscribers. Panic recovery on approval/request handlers. |
 | `rpc.go` | JSON-RPC 2.0 framing over line-delimited JSON. Outbound request/response correlation by id; inbound dispatch to notify + request callbacks. Error chain preservation. |
-| `executor.go` | `Executor` interface + `LocalExecutor`. Swap in fakes for tests or remote execution. |
+| `executor.go` | `Executor` interface + `LocalExecutor`. Swap in fakes for tests or remote execution. Cancellation kills the whole process tree (codex + MCP servers + shell children): `Setpgid` + `kill(-pid, SIGTERM)` on unix, a kill-on-close job object + `TerminateJobObject` on Windows (`executor_windows.go`), where every spawn is also marked CREATE_NO_WINDOW. |
+| `shim.go` | Resolves npm's Windows `.cmd` shim to the `bin/codex.js` it wraps, so the executor can run node on it directly (os/exec refuses batch-file args it cannot safely escape). |
 | `option.go` | Functional options (`WithCwd`, `WithModel`, `WithEphemeralThread`, ...). Extras hatch via `WithThreadExtra` / `WithTurnExtra`. |
 | `event.go` | Sealed `Event` interface + the turn/item lifecycle events. |
 | `event_lifecycle.go` | Thread-, plan-, and connection-level events added for codex 0.14x (status, plan, warnings, MCP startup, reroute). |
@@ -469,6 +470,35 @@ Three changes need consumer action; the rest are additive.
 `schema.CommandExecutionRequestApprovalParams.AdditionalPermissions` and
 `.AvailableDecisions` are now only sent when the connection opts in via
 `WithExperimentalAPI()`; they decode as empty otherwise.
+
+## Windows notes
+
+- **Job-object assignment happens post-start** — os/exec offers no
+  `CREATE_SUSPENDED` path, so the codex process is placed in the
+  kill-on-close job just after `Start()` returns. A child codex spawned in
+  that window would escape the job; in practice codex takes far longer than
+  that to start MCP servers. If job creation or assignment fails, the
+  executor degrades to killing only the codex process instead of failing
+  the spawn.
+- **npm's `codex.cmd` shim is bypassed** — when the layout confirms it wraps
+  `@openai/codex`, the executor runs node on the wrapped `bin/codex.js`
+  directly; os/exec refuses to start batch files with arguments cmd.exe
+  cannot safely escape (the CVE-2024-24576 hardening). Falls back to running
+  the shim when node is missing or the layout is unconfirmed.
+- **Cancelling `Update` kills without grace** — unix cancellation sends
+  SIGINT to the updater's process group so a staged download can be unwound
+  before the kill lands; Windows has no console interrupt deliverable from a
+  windowless parent, so cancellation there is an immediate job-object tree
+  kill. A cancelled Windows update may leave a staged partial download for
+  the installer to clean up on its next run.
+- **An external kill reads as a crash** — there are no signals, so a codex
+  terminated from outside (Task Manager, `taskkill`) exits with a plain code
+  and `ProcessExitError.Reason` reports `crashed`, not `killed`.
+  SDK-initiated termination still reports `context_canceled`.
+- **No Windows CI** — the console-suppression, job-object and shim-bypass
+  paths need a manual smoke test on real Windows: spawn a connection, cancel
+  it, and confirm no survivors in Task Manager; same for a cancelled
+  `Update`. The shim resolver itself is unit-tested on linux.
 
 ## Conventions
 

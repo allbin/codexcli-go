@@ -125,6 +125,11 @@ const stderrDrainGracePeriod = 1 * time.Second
 // ProcessExitError. Adapted from claudecli-go's classifyExit; the
 // context-cancellation branch wins because SDK-initiated kills should
 // surface as "we did this" rather than "the process crashed".
+//
+// On Windows there are no signals, so an externally terminated codex (Task
+// Manager, taskkill) exits with a plain code and reports "crashed" rather
+// than "killed" — the platform offers nothing to tell the two apart.
+// SDK-initiated kills are unaffected: they arrive with ctxErr set.
 func classifyExit(waitErr error, ctxErr error, lastStderr string) *ProcessExitError {
 	signal, code := extractExitDetails(waitErr)
 	ev := &ProcessExitError{
