@@ -42,6 +42,17 @@ or pin a specific version (e.g. `@v0.3.0`).
   did not — so a windowless parent (a service, a GUI app) flashed a console
   on screen for each detection.
 
+- **Windows: npm's `codex.cmd` shim is bypassed.** When the resolved binary
+  is npm's cmd.exe shim and the layout confirms it wraps `@openai/codex`,
+  the executor runs node on the wrapped `bin/codex.js` directly — os/exec
+  refuses to start batch files with arguments cmd.exe cannot safely escape
+  (the CVE-2024-24576 hardening), so an argument containing `%` or `"`
+  failed at `Start()` behind a shim. The bypass also removes the cmd.exe
+  layer from the process tree. Falls back to running the shim when node is
+  missing or the layout is unconfirmed. The resolver is platform-neutral
+  (`shim.go`) and unit-tested on linux; the live path needs a manual smoke
+  test on real Windows.
+
 ## [0.3.0] - 2026-08-27
 
 Adds the two idle-connection reads a usage indicator needs: who is signed in,
