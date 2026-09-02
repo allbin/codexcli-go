@@ -36,6 +36,12 @@ or pin a specific version (e.g. `@v0.3.0`).
   Upgrade note: adds a `golang.org/x/sys` dependency (Windows builds only);
   no API changes.
 
+- **Windows: the `--version` probe now suppresses its console window.** The
+  executor, `Doctor` and `Update` spawns already set CREATE_NO_WINDOW, but
+  the probe `DetectInstall` and `Update` run to read the installed version
+  did not — so a windowless parent (a service, a GUI app) flashed a console
+  on screen for each detection.
+
 ## [0.3.0] - 2026-08-27
 
 Adds the two idle-connection reads a usage indicator needs: who is signed in,

@@ -343,7 +343,9 @@ func runVersionProbe(ctx context.Context, binary string) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, defaultInstallTimeout)
 		defer cancel()
 	}
-	out, err := exec.CommandContext(ctx, binary, "--version").Output()
+	cmd := exec.CommandContext(ctx, binary, "--version")
+	hideConsoleWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("codexcli: version probe: %w", err)
 	}
