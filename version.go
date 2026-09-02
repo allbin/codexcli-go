@@ -2,7 +2,7 @@ package codexcli
 
 // SDKVersion is the codexcli-go release identifier sent in client metadata
 // during the `initialize` handshake. Bump on every public-API change.
-const SDKVersion = "0.3.0"
+const SDKVersion = "0.3.1"
 
 // DefaultClientName is sent as `initialize.params.clientInfo.name`. Override
 // via WithClientInfo when embedding codexcli-go in a named product —

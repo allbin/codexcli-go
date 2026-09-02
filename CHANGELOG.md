@@ -11,9 +11,19 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.3.0`).
+or pin a specific version (e.g. `@v0.3.1`).
 
 ## [Unreleased]
+
+## [0.3.1] - 2026-09-02
+
+Process-lifecycle hardening, most of it Windows-specific: cancellation now
+tears down codex's whole process tree instead of the single PID, the npm
+`codex.cmd` shim no longer blocks spawns with awkward arguments, and the
+`--version` probe stops flashing a console window. No API changes; Windows
+builds gain a `golang.org/x/sys` dependency.
+
+`SDKVersion` is `0.3.1` (was `0.3.0`).
 
 ### Fixed
 
@@ -325,7 +335,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/allbin/codexcli-go/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/allbin/codexcli-go/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/allbin/codexcli-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/allbin/codexcli-go/releases/tag/v0.1.0
