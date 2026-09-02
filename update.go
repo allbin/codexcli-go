@@ -24,7 +24,9 @@ const defaultUpdateTimeout = 10 * time.Minute
 // installer stages a download in a temporary directory and swaps symlinks into
 // place at the end, and it removes that directory from an EXIT/INT/TERM trap —
 // so letting it notice the signal is what keeps a cancelled update from
-// leaving a half-unpacked release tree behind.
+// leaving a half-unpacked release tree behind. Unix only: on Windows no
+// interrupt is deliverable and cancellation kills the tree immediately, so
+// this bounds only the pipe teardown there.
 const updateInterruptGrace = 5 * time.Second
 
 // maxUpdateOutputLines caps the transcript kept in UpdateResult.Output. The
@@ -277,9 +279,13 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 // because a half-run update still has before/after numbers worth rendering.
 //
 // The caller's context deadline is honoured. Without one the run is bounded by
-// [WithUpdateTimeout], defaulting to ten minutes. A cancelled run is
-// interrupted rather than killed outright so the installer can unwind its
-// staged download instead of leaving a partial release tree behind.
+// [WithUpdateTimeout], defaulting to ten minutes. On unix a cancelled run is
+// interrupted rather than killed outright — SIGINT to the updater's process
+// group — so the installer can unwind its staged download instead of leaving a
+// partial release tree behind. On Windows no interrupt is deliverable from a
+// windowless parent, so cancellation is an immediate tree kill via a job
+// object; a cancelled Windows update may leave a staged partial download for
+// the installer to clean up on its next run.
 func Update(ctx context.Context, opts ...UpdateOption) (*UpdateResult, error) {
 	return defaultInstallClient.Update(ctx, opts...)
 }
@@ -561,20 +567,22 @@ func nearestExistingDir(dir string) (string, error) {
 // execUpdate runs `<binary> update`, forwarding every output line to onLine as
 // it arrives.
 //
-// Cancellation interrupts rather than kills: the installer traps INT/TERM to
-// remove its staging directory, so giving it a moment to unwind is what keeps
-// a cancelled run from leaving a partial release tree behind. The kill still
-// happens after updateInterruptGrace, and on platforms where an interrupt
-// cannot be delivered it happens immediately.
+// On unix, cancellation interrupts rather than kills: the installer traps
+// INT/TERM to remove its staging directory, so SIGINT to the process group
+// gives it — and any children doing the actual download — a moment to unwind
+// before the kill lands after updateInterruptGrace. Windows has no
+// deliverable interrupt from a windowless parent (GenerateConsoleCtrlEvent
+// only reaches processes on the caller's own console), so cancellation there
+// is an immediate job-object tree kill: no grace period, but no orphaned
+// children either.
 func execUpdate(ctx context.Context, binary string, env []string, workDir string, onLine func(string)) (int, error) {
 	cmd := exec.CommandContext(ctx, binary, "update")
 	cmd.Env = env
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	pp := setUpdateCancel(cmd)
 	cmd.WaitDelay = updateInterruptGrace
-	hideConsoleWindow(cmd)
 
 	// os/exec serializes writes when Stdout and Stderr are the same comparable
 	// writer, so one line splitter safely sees both streams interleaved.
@@ -582,7 +590,12 @@ func execUpdate(ctx context.Context, binary string, env []string, workDir string
 	cmd.Stdout = w
 	cmd.Stderr = w
 
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		pp.afterStart(cmd)
+		err = cmd.Wait()
+	}
+	pp.release()
 	w.flush()
 
 	if err == nil {

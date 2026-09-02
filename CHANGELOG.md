@@ -53,6 +53,15 @@ or pin a specific version (e.g. `@v0.3.0`).
   (`shim.go`) and unit-tested on linux; the live path needs a manual smoke
   test on real Windows.
 
+- **Cancelling `Update` interrupts the whole process group.** On unix,
+  SIGINT now goes to the updater's process group (previously the single
+  codex process), so any children unwinding a staged download are
+  interrupted too. On Windows — where no console interrupt is deliverable
+  from a windowless parent — cancellation is an immediate job-object tree
+  kill instead of a lone `codex.exe` kill that orphaned children; a
+  cancelled Windows update may leave a staged partial download for the
+  installer to clean up on its next run.
+
 ## [0.3.0] - 2026-08-27
 
 Adds the two idle-connection reads a usage indicator needs: who is signed in,
