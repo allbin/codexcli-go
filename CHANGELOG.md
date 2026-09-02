@@ -15,6 +15,27 @@ or pin a specific version (e.g. `@v0.3.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cancelling a connection now kills codex's whole process tree.**
+  Previously context cancellation killed only the codex process — the MCP
+  servers and turn shell commands it spawned survived until their own
+  stdin-EOF handling exited them, or forever if wedged. `LocalExecutor` now
+  confines each spawn: on unix the child gets its own process group
+  (`Setpgid`) and cancellation sends SIGTERM to the group, with a kill after
+  a 5s unwind; on Windows each spawn is placed in an anonymous kill-on-close
+  job object — cancel calls `TerminateJobObject` (tree kill), and closing
+  the handle after `Wait()` reaps stragglers that outlive a clean codex
+  exit. If job creation or assignment fails, the executor degrades to the
+  old single-PID kill rather than failing the spawn. Known caveat:
+  assignment happens just after `Start()` (os/exec has no `CREATE_SUSPENDED`
+  path), so a child forked in that instant could escape — in practice codex
+  takes far longer to start MCP servers. There is no Windows CI, so the job
+  path needs a manual smoke test on real Windows.
+
+  Upgrade note: adds a `golang.org/x/sys` dependency (Windows builds only);
+  no API changes.
+
 ## [0.3.0] - 2026-08-27
 
 Adds the two idle-connection reads a usage indicator needs: who is signed in,

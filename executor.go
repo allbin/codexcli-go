@@ -54,12 +54,15 @@ func (e *LocalExecutor) Start(ctx context.Context, cfg *StartConfig) (*Process, 
 	}
 
 	args := append([]string{"app-server"}, cfg.Args...)
-	cmd := exec.CommandContext(ctx, resolved, args...)
+	cmd := buildPlatformCmd(ctx, resolved, args)
 	cmd.Env = buildEnv(cfg.Env)
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
-	hideConsoleWindow(cmd)
+	// Confine the child's process tree so cancellation kills codex together
+	// with its MCP servers and shell children: a process group on unix, a
+	// kill-on-close job object on Windows (which also hides the console).
+	pp := setPlatformAttrs(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -77,17 +80,24 @@ func (e *LocalExecutor) Start(ctx context.Context, cfg *StartConfig) (*Process, 
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		pp.release()
 		stdin.Close()
 		stdout.Close()
 		stderr.Close()
 		return nil, fmt.Errorf("start: %w", err)
 	}
+	// Finalize confinement (job-object assignment on Windows; no-op on unix).
+	pp.afterStart(cmd)
 
 	return &Process{
 		Stdout: stdout,
 		Stderr: stderr,
 		Stdin:  stdin,
-		Wait:   cmd.Wait,
+		Wait: func() error {
+			err := cmd.Wait()
+			pp.release()
+			return err
+		},
 	}, nil
 }
 
