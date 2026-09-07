@@ -11,9 +11,18 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.3.1`).
+or pin a specific version (e.g. `@v0.3.2`).
 
 ## [Unreleased]
+
+## [0.3.2] - 2026-09-07
+
+One fix: `UnwrapShellCommand` handles the double-quoted `bash -lc "…"`
+envelope codex uses whenever a command contains a single quote, so
+`CommandLiteral()` no longer leaks the outer quotes to consumers. No API
+changes.
+
+`SDKVersion` is `0.3.2` (was `0.3.1`).
 
 ### Fixed
 
@@ -348,7 +357,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/allbin/codexcli-go/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/allbin/codexcli-go/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/allbin/codexcli-go/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/allbin/codexcli-go/compare/v0.1.0...v0.2.0
