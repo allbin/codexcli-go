@@ -820,25 +820,63 @@ func (t *ThreadItem) CommandLiteral() string {
 
 // UnwrapShellCommand extracts the inner script from a "<shell> -lc '…'" (or
 // "-c") invocation — e.g. "/usr/bin/bash -lc 'cat foo.txt'" yields
-// "cat foo.txt" — decoding the POSIX '\” escape for embedded single quotes.
-// Input that isn't wrapped is returned trimmed but otherwise unchanged.
+// "cat foo.txt". Codex single-quotes the body by default and switches to
+// double quotes when the body itself contains a single quote (e.g.
+// `bash -lc "sed -n '1,240p' f"`); both wrappers are stripped, decoding the
+// POSIX '\” escape inside single quotes and the backslash escapes bash
+// honours inside double quotes. A bare body (`bash -lc ls`) and input that
+// isn't wrapped at all are returned trimmed but otherwise unchanged.
 func UnwrapShellCommand(cmd string) string {
 	s := strings.TrimSpace(cmd)
 	for _, flag := range []string{" -lc ", " -c ", " -lc\t", " -c\t"} {
 		if i := strings.Index(s, flag); i >= 0 {
-			return unquoteSingle(strings.TrimSpace(s[i+len(flag):]))
+			return unquoteShell(strings.TrimSpace(s[i+len(flag):]))
 		}
 	}
 	return s
 }
 
-// unquoteSingle strips a surrounding pair of single quotes and decodes the
-// POSIX '\” escape sequence for embedded single quotes.
-func unquoteSingle(s string) string {
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+// unquoteShell strips a surrounding pair of single or double quotes,
+// decoding the escapes each form permits. Inside single quotes only the
+// POSIX '\” idiom is decoded; inside double quotes a backslash escapes
+// only `"`, `\`, `$` and “`” (plus a line continuation), and is kept
+// literally before any other character, exactly as bash does.
+func unquoteShell(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+	switch {
+	case s[0] == '\'' && s[len(s)-1] == '\'':
 		return strings.ReplaceAll(s[1:len(s)-1], `'\''`, `'`)
+	case s[0] == '"' && s[len(s)-1] == '"':
+		return decodeDoubleQuoted(s[1 : len(s)-1])
 	}
 	return s
+}
+
+func decodeDoubleQuoted(body string) string {
+	if !strings.Contains(body, `\`) {
+		return body
+	}
+	var b strings.Builder
+	b.Grow(len(body))
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if c != '\\' || i+1 >= len(body) {
+			b.WriteByte(c)
+			continue
+		}
+		switch next := body[i+1]; next {
+		case '"', '\\', '$', '`':
+			b.WriteByte(next)
+			i++
+		case '\n':
+			i++ // line continuation: both characters vanish
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // TokenUsageBreakdown holds per-turn or aggregate token counts.

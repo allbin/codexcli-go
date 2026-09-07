@@ -15,6 +15,19 @@ or pin a specific version (e.g. `@v0.3.1`).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`UnwrapShellCommand` now strips a double-quoted body.** Codex wraps a
+  command in `bash -lc "…"` instead of `'…'` whenever the command itself
+  contains a single quote — `sed -n '1,240p' f` and `rg -n 'x' .` are the
+  everyday cases — and the unwrapper only knew the single-quoted form, so
+  `ThreadItem.CommandLiteral()` returned the body with its outer double
+  quotes still attached. Consumers surfaced that verbatim as the tool row's
+  command (agentkit's codex connector showed `"sed -n '1,240p' f"`). Both
+  wrappers are now stripped, decoding the escapes each permits (`'\''`
+  inside single quotes; `\"`, `\\`, `\$`, `` \` `` and line continuations
+  inside double quotes). Bare bodies (`bash -lc ls`) are unchanged.
+
 ## [0.3.1] - 2026-09-02
 
 Process-lifecycle hardening, most of it Windows-specific: cancellation now

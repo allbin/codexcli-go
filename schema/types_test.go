@@ -131,8 +131,10 @@ func TestThreadItem_CommandLiteral(t *testing.T) {
 	}
 }
 
-// TestUnwrapShellCommand covers the -lc/-c envelope forms, the POSIX '\”
-// escape, and the pass-through for unwrapped input.
+// TestUnwrapShellCommand covers the -lc/-c envelope forms, both quoting
+// styles codex emits (single by default, double once the body contains a
+// single quote — captured live from codex-cli 0.153.4), the escapes each
+// permits, the bare unquoted body, and the pass-through for unwrapped input.
 func TestUnwrapShellCommand(t *testing.T) {
 	cases := map[string]string{
 		`/usr/bin/bash -lc 'cat foo.txt'`:     "cat foo.txt",
@@ -140,9 +142,20 @@ func TestUnwrapShellCommand(t *testing.T) {
 		`/usr/bin/bash -lc 'gcc -c foo.c'`:    "gcc -c foo.c",
 		`/usr/bin/bash -lc 'echo '\''hi'\'''`: "echo 'hi'",
 		"/usr/bin/bash -lc\t'ls'":             "ls",
-		`ls -la`:                              "ls -la",
-		`  trimmed  `:                         "trimmed",
-		``:                                    "",
+		// Double-quoted bodies, as captured on the wire.
+		`/usr/bin/bash -lc "sed -n '1,240p' src/greet.go"`: "sed -n '1,240p' src/greet.go",
+		`/usr/bin/bash -lc "rg -n 'Farewell' ."`:           "rg -n 'Farewell' .",
+		// Escapes bash honours inside double quotes decode; others stay literal.
+		`/usr/bin/bash -lc "echo \"hi\" \$HOME \\ \n"`: `echo "hi" $HOME \ \n`,
+		// A backslash inside single quotes is never an escape.
+		`/usr/bin/bash -lc 'printf "a\"b"'`: `printf "a\"b"`,
+		// Bare body, also emitted by codex.
+		`/usr/bin/bash -lc ls`: "ls",
+		// Mismatched wrappers are not stripped.
+		`/usr/bin/bash -lc "ls'`: `"ls'`,
+		`ls -la`:                 "ls -la",
+		`  trimmed  `:            "trimmed",
+		``:                       "",
 	}
 	for in, want := range cases {
 		if got := UnwrapShellCommand(in); got != want {
