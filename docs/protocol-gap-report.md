@@ -94,6 +94,14 @@ Section A concludes the flag is unnecessary — that holds for the *protocol* ga
 parity. `thread/settings/update` is the only route to a mid-session model switch, effort
 change, or plan mode, and it is fully gated `[live]`:
 
+> **Correction (codex 0.153.4)**: not the only route for model and effort. `turn/start`
+> `effort` and `model` are sticky, so a stable connection switches both by sending them on
+> the next `turn/start`; later turns keep them `[live]`, confirmed on the model requests
+> through a logging proxy. `thread/settings/update` is only needed to change them without
+> starting a turn. Plan mode still needs `experimentalApi`, through this method or the
+> experimental `collaborationMode` field on `turn/start` `[schema]`. See the README's
+> "Reasoning effort" section.
+
 ```
 stable                thread/settings/update requires experimentalApi capability
 experimentalApi=true  OK {}                   (effort, model, collaborationMode, approvalPolicy)
@@ -571,9 +579,11 @@ yet"* `[live]`*)*, `thread/memoryMode/set`, `thread/queue/add`, `thread/queue/de
 `thread/revert`, `thread/search`, `thread/searchOccurrences`, `thread/settings/update`,
 `thread/turns/list`.
 
-### Server notifications — 27 of 74
+### Server notifications — 28 of 74
 
 **Handled** (typed event): `thread/started` (logged only, not surfaced), `thread/status/changed`,
+`thread/settings/updated` *(added later; codex 0.153.4 sends it only to `experimentalApi`
+connections* `[live]`*)*,
 `thread/tokenUsage/updated`, `thread/compacted` *(deprecated by the server, see C)*,
 `turn/started`, `turn/completed`, `turn/diff/updated`, `turn/plan/updated`, `item/started`,
 `item/completed`, `item/agentMessage/delta`, `item/plan/delta`,
@@ -601,7 +611,6 @@ relevance to a session orchestrator:
 | `serverRequest/resolved` | A server request was answered elsewhere — cancels a pending prompt |
 | `hook/started`, `hook/completed` | `hooks` is default-on |
 | `thread/archived`, `thread/unarchived`, `thread/deleted` | Session list sync |
-| `thread/settings/updated` | Mid-session model/effort changes |
 | `mcpServer/oauthLogin/completed` | MCP auth flow |
 | `account/updated`, `account/login/completed` | Auth state |
 | `fs/changed` | Only if `fs/watch` is used |
@@ -889,6 +898,21 @@ func (c *Conn) ListCollaborationModes(ctx context.Context) ([]schema.Collaborati
 ```
 
 All five verified to return `OK` against a live thread with `experimentalApi: true` `[live]`.
+
+What codex 0.153.4 does with the effort half `[live]`:
+
+- `thread/settings/update {effort}` applies from the next turn and emits
+  `thread/settings/updated`. It accepts any string (`"bogus"` returns `{}` and the next turn
+  fails upstream), and `effort: null` is a silent no-op.
+- `turn/start {effort}` is the stable equivalent. On `experimentalApi` connections it emits
+  the same notification when the value changes; stable connections get no notification.
+- Changing the running turn needs `turn/settings/update`, which answers
+  `turn settings updates require the step_model_switching feature` unless that
+  `underDevelopment` feature is enabled. With `--enable step_model_switching` it returns
+  `{"status":"applied"}`, the turn's next model request uses the new effort, and the thread
+  setting is untouched.
+- Effort on a `turn/start` that steers an active turn does not reach that turn; it applies
+  from the next one.
 
 ### 6. Tool progress — the ticker plus the MCP passthrough
 

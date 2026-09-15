@@ -3,7 +3,7 @@
 package codexcli
 
 // Live checks of the reasoning-effort behaviour WithEffort documents. They
-// run against the codex on PATH with a signed-in account and spend eight
+// run against the codex on PATH with a signed-in account and spend seven
 // small model turns:
 //
 //	go test -tags integration -run TestLive_Effort -count=1 -v .

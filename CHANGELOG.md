@@ -15,6 +15,47 @@ or pin a specific version (e.g. `@v0.3.2`).
 
 ## [Unreleased]
 
+A typed read-back for reasoning-effort and other sticky turn settings, and
+documentation of how a live effort change actually behaves, verified
+against codex 0.153.4 by reading `reasoning.effort` off the model requests
+codex sends. No behaviour changes to what the SDK sends on the wire.
+
+### Added
+
+- **`ThreadSettingsUpdatedEvent`** decodes `thread/settings/updated`. It
+  carries typed `ThreadID`, `Model`, `ModelProvider`, `Effort`, `Summary`,
+  and `ServiceTier` (empty for null) plus `SettingsRaw`, the full snapshot.
+  Decode that with the new `schema.ThreadSettings` for cwd, approval, and
+  sandbox fields. `schema.ThreadSettingsUpdatedNotification` and
+  `schema.MethodThreadSettingsUpdated` back it. Codex 0.153.4 sends the
+  notification only to connections opened with `WithExperimentalAPI`, and
+  only when a `turn/start` changes a setting.
+- **`effort_live_test.go`** (build tag `integration`) routes codex through a
+  local proxy and asserts the effort on its model requests. Run it on a
+  codex bump: `go test -tags integration -run TestLive_Effort -count=1 -v .`
+
+### Changed
+
+- **`thread/settings/updated` no longer surfaces as `*UnknownEvent`.**
+  Upgrade note: code that matched `UnknownEvent{Method:
+  "thread/settings/updated"}` must switch to `*ThreadSettingsUpdatedEvent`.
+
+### Documentation
+
+- **`WithEffort` spells out the stickiness rules.** Codex keeps a
+  `turn/start` effort for later turns. A per-call `WithEffort` therefore
+  sticks, unless the client was built with `WithEffort`, which the SDK
+  re-sends on every turn, so the override lasts one turn. `WithEffort("")`
+  sends nothing and reverts nothing. There is no reset to a default: codex
+  ignores `effort: null` and keeps the effort across a model change. Codex
+  does not validate levels, so a level the model rejects fails that turn and
+  every later one until a valid level is sent. `"ultra"` is sent to the
+  model as its highest level. Effort on a steering `turn/start` applies from
+  the next turn, not the running one. The README has a new
+  [Reasoning effort](README.md#reasoning-effort) section with the same
+  rules as a table, and `WithModel`, `Thread.StartTurn`, and
+  `Thread.Response` point at them.
+
 ## [0.3.2] - 2026-09-07
 
 One fix: `UnwrapShellCommand` handles the double-quoted `bash -lc "…"`

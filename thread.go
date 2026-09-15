@@ -47,6 +47,10 @@ func (t *Thread) Interrupt(ctx context.Context) error {
 
 // Response returns the server's thread/start payload (model resolution,
 // approval policy, instruction sources, sandbox details).
+//
+// It is a snapshot and does not track later turns. ReasoningEffort is the
+// level the thread started with, or for a resumed thread the level it was
+// last left at, which may be a per-turn override from an earlier session.
 func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
 
 // StartTurn dispatches turn/start with the given prompt and returns a
@@ -55,6 +59,9 @@ func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
 //
 // Multiple concurrent turns on the same thread are not supported by
 // codex app-server — call StartTurn sequentially.
+//
+// opts layer over the connection's options, and codex keeps some turn
+// settings for later turns. WithEffort documents how the two interact.
 func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (*Stream, error) {
 	return t.StartTurnInput(ctx, []schema.UserInput{schema.TextInput(prompt)}, opts...)
 }
@@ -62,6 +69,7 @@ func (t *Thread) StartTurn(ctx context.Context, prompt string, opts ...Option) (
 // StartTurnInput dispatches turn/start with typed user input blocks and
 // returns a stream of typed events scoped to this turn. Use this for image,
 // local-image, skill, and mention inputs without relying on raw turn extras.
+// Options behave as on StartTurn.
 func (t *Thread) StartTurnInput(ctx context.Context, input []schema.UserInput, opts ...Option) (*Stream, error) {
 	events := make(chan Event, 64)
 	done := make(chan struct{})

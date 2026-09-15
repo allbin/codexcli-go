@@ -94,7 +94,10 @@ func WithCwd(cwd string) Option {
 	return func(o *options) { o.cwd = cwd }
 }
 
-// WithModel overrides the model on thread/start and turn/start.
+// WithModel overrides the model on thread/start and turn/start. Codex
+// keeps a turn/start model for later turns the same way it keeps effort,
+// and a connect-time WithModel is re-sent on every turn/start; see
+// WithEffort. Changing model does not change the effort.
 func WithModel(model string) Option {
 	return func(o *options) { o.model = model }
 }
@@ -173,9 +176,43 @@ func WithTurnExtra(extra map[string]any) Option {
 	}
 }
 
-// WithEffort overrides the reasoning effort on turn/start. Values map
-// to schema.ReasoningEffort ("none", "minimal", "low", "medium", "high",
-// "xhigh").
+// WithEffort sets the reasoning effort sent on turn/start.
+//
+// Codex keeps the effort from a turn/start for every later turn on the
+// thread. A turn/start without one leaves it unchanged, and so does a
+// resume. Where you pass the option decides what that means in practice:
+//
+//   - Per call, on StartTurn or StartTurnInput, the level sticks. Later
+//     plain StartTurn calls keep running at it.
+//   - On New or Connect, the SDK re-sends the level on every turn/start.
+//     A per-call override then lasts one turn, because the next plain
+//     StartTurn sends the connect-time level again.
+//   - WithEffort("") sends no effort. Per call it also stops the
+//     connect-time level going out for that turn, so the thread keeps the
+//     level it last ran with. It reverts nothing.
+//
+// There is no reset to a default. Codex ignores an explicit null, and a
+// model change keeps the effort. To go back, send the level explicitly.
+// Thread.Response().ReasoningEffort holds the level a new thread started
+// with. After ResumeThread it holds the level the thread was left at.
+//
+// Codex does not validate the value. Pick from the model's
+// SupportedReasoningEfforts (Conn.ListModels). A level the model rejects,
+// such as "max" on gpt-5.5, still starts the turn, which then fails with
+// invalid_request_error. The level sticks, so every later turn fails
+// until one sends a valid level. "ultra" is codex's own level: codex
+// records it as ultra and sends the model's highest level instead.
+//
+// A turn/start that steers an active turn does not change that turn's
+// effort, but its level applies from the next turn on.
+//
+// On a connection opened with WithExperimentalAPI, codex reports each
+// change as a ThreadSettingsUpdatedEvent. Without it nothing reports the
+// level in force, so it is the last level you sent, or the thread's
+// starting level if you never sent one.
+//
+// Observed against codex 0.153.4. The integration-tagged
+// effort_live_test.go re-checks the stickiness rules and the event.
 func WithEffort(effort string) Option {
 	return func(o *options) { o.effort = effort }
 }

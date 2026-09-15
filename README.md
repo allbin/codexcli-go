@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, aggregated diffs, MCP server startup status, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, realtime/audio, and the file/exec/account/plugin RPC surfaces are not yet wired. Tested end-to-end against codex CLI 0.147.0; a normal turn produces no `UnknownEvent`.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, aggregated diffs, MCP server startup status, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, realtime/audio, and the file/exec/account/plugin RPC surfaces are not yet wired. Tested end-to-end against codex CLI 0.147.0; a normal turn produces no `UnknownEvent`. The [reasoning effort](#reasoning-effort) behaviour below was verified against 0.153.4.
 
 ## Install
 
@@ -59,6 +59,39 @@ if errors.Is(err, codexcli.ErrThreadNotFound) {
 }
 
 stream, _ := thread.StartTurn(ctx, "Continue where we left off.")
+```
+
+## Reasoning effort
+
+Codex keeps the effort a `turn/start` carries for every later turn on the thread. The SDK layers its own options on top of that, and the two interact in ways that are easy to get wrong. Observed on codex 0.153.4 by reading `reasoning.effort` off the model requests codex sends:
+
+| You call | Sent on `turn/start` | The model runs at |
+|---|---|---|
+| `StartTurn(ctx, p, WithEffort("high"))` | `"high"` | high, on this turn and every plain turn after it |
+| `StartTurn(ctx, p)` on a client built without `WithEffort` | nothing | whatever the thread last ran at |
+| `StartTurn(ctx, p)` on a client built with `WithEffort("low")` | `"low"`, every time | low, so a per-call override from the previous turn is gone |
+| `StartTurn(ctx, p, WithEffort(""))` | nothing, even with a connect-time level | whatever the thread last ran at; `""` reverts nothing |
+| `WithTurnExtra(map[string]any{"effort": nil})` | `null` | unchanged; codex ignores it |
+
+To switch a live session's effort, send the new level on every turn, or once on a client with no connect-time `WithEffort`. There is no reset to the model default. Changing model keeps the effort, so going back means sending the level you want. `Thread.Response().ReasoningEffort` is the level a new thread started with; after `ResumeThread` it is the level the thread was left at, override included.
+
+Pick levels from `schema.Model.SupportedReasoningEfforts`. Codex does not validate them. A level the model rejects (`"minimal"` on gpt-5.6-sol, `"max"` on gpt-5.5) starts the turn and fails it with `invalid_request_error`, and because the level sticks, every later turn fails the same way until one sends a valid level. `"ultra"` is codex's own level: codex stores it as `ultra` and sends the model's highest level (`max` on gpt-5.6-sol, `xhigh` on gpt-5.5).
+
+Reading the level back:
+
+- On a connection opened with `WithExperimentalAPI`, codex sends `thread/settings/updated` whenever a `turn/start` changes a setting, just before the `turn/start` response. It arrives on that turn's stream as `ThreadSettingsUpdatedEvent`. Re-sending the current level produces no event.
+- Without `WithExperimentalAPI`, codex sends nothing. The level in force is the last one you sent, or the thread's starting level.
+
+Known limitations:
+
+- **No mid-turn change.** Effort on a `turn/start` that steers a running turn does not reach that turn; it applies from the next turn. On an experimental connection the settings event still fires at steer time with the new level, so for the rest of the running turn it reports a level the model is not using. The experimental `turn/settings/update` does change a running turn, but codex refuses it unless the `step_model_switching` feature is enabled, and that feature is `underDevelopment`.
+- **The event needs `experimentalApi`.** Codex 0.153.4 does not send `thread/settings/updated` to stable connections.
+- **No between-turn setter.** On experimental connections codex also accepts `thread/settings/update`, which changes effort without starting a turn and, like `turn/start`, accepts any string. The SDK does not wrap it. The event it triggers arrives when no turn is streaming, and the SDK drops events that have no subscriber.
+
+`effort_live_test.go` re-checks the stickiness rules and the event against the codex on `PATH` (it spends seven small turns):
+
+```
+go test -tags integration -run TestLive_Effort -count=1 -v .
 ```
 
 ## Listing available models
@@ -324,6 +357,7 @@ The event stream surfaces typed events for the full server notification set:
 | `TurnDiffUpdatedEvent` | `turn/diff/updated` | Aggregated unified diff for the turn |
 | `TurnPlanUpdatedEvent` | `turn/plan/updated` | The agent's todo plan, resent in full on every change |
 | `ThreadStatusChangedEvent` | `thread/status/changed` | Thread went active/idle — brackets every turn |
+| `ThreadSettingsUpdatedEvent` | `thread/settings/updated` | Settings the next turn runs with (effort, model, ...), sent when a `turn/start` changes one. Experimental connections only; see [Reasoning effort](#reasoning-effort) |
 | `ContextCompactedEvent` | `thread/compacted` | Codex summarised earlier history to fit the context window |
 | `TokenUsageUpdatedEvent` | `thread/tokenUsage/updated` | Token usage snapshot — the only source of usage since 0.14x |
 | `RateLimitsUpdatedEvent` | `account/rateLimits/updated` | Rate limit status (broadcast to all subscribers) |
