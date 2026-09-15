@@ -675,6 +675,35 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				ThreadID: p.ThreadId, Status: p.StatusType(), StatusRaw: p.Status,
 			})
 		}
+	case schema.MethodThreadSettingsUpdated:
+		var p schema.ThreadSettingsUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			// Decode only the promoted fields, so upstream reshaping a field
+			// this event does not type (sandbox, collaboration mode) cannot
+			// drop the notification.
+			var s struct {
+				Model         string  `json:"model"`
+				ModelProvider string  `json:"modelProvider"`
+				Effort        *string `json:"effort"`
+				Summary       *string `json:"summary"`
+				ServiceTier   *string `json:"serviceTier"`
+			}
+			_ = json.Unmarshal(p.ThreadSettings, &s)
+			ev := &ThreadSettingsUpdatedEvent{
+				ThreadID: p.ThreadId, Model: s.Model, ModelProvider: s.ModelProvider,
+				SettingsRaw: p.ThreadSettings,
+			}
+			if s.Effort != nil {
+				ev.Effort = *s.Effort
+			}
+			if s.Summary != nil {
+				ev.Summary = *s.Summary
+			}
+			if s.ServiceTier != nil {
+				ev.ServiceTier = *s.ServiceTier
+			}
+			c.deliver(p.ThreadId, ev)
+		}
 	case schema.MethodTurnPlanUpdated:
 		var p schema.TurnPlanUpdatedNotification
 		if err := json.Unmarshal(params, &p); err == nil {

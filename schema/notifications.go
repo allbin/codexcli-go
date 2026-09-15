@@ -34,7 +34,57 @@ const (
 	// MethodConfigWarning reports a problem in the user's config.toml. It
 	// fires during connection setup, before any thread exists.
 	MethodConfigWarning = "configWarning"
+	// MethodThreadSettingsUpdated carries the thread's settings after a
+	// change to model, effort, or another sticky turn setting. Codex
+	// 0.153.4 only sends it on connections that negotiated experimentalApi.
+	MethodThreadSettingsUpdated = "thread/settings/updated"
 )
+
+// ThreadSettings is the thread's full settings snapshot as reported by
+// `thread/settings/updated`: what the next turn runs with unless its
+// turn/start overrides something.
+type ThreadSettings struct {
+	Cwd               string            `json:"cwd"`
+	ApprovalPolicy    AskForApproval    `json:"approvalPolicy"`
+	ApprovalsReviewer ApprovalsReviewer `json:"approvalsReviewer"`
+	// SandboxPolicy is the camelCase tagged SandboxPolicy union
+	// ({"type":"dangerFullAccess"}, ...), left raw.
+	SandboxPolicy           json.RawMessage `json:"sandboxPolicy"`
+	ActivePermissionProfile json.RawMessage `json:"activePermissionProfile,omitempty"`
+	Model                   string          `json:"model"`
+	ModelProvider           string          `json:"modelProvider"`
+	ServiceTier             *string         `json:"serviceTier"`
+	// Effort is the reasoning effort as codex stores it, which is not
+	// always the value sent to the model: "ultra" goes out as the model's
+	// highest supported level.
+	Effort *string `json:"effort"`
+	// Summary is the reasoning summary mode ("auto", "concise",
+	// "detailed", "none"), or nil when unset.
+	Summary *string `json:"summary"`
+	// CollaborationMode is {"mode": ..., "settings": {...}}; its settings
+	// object is snake_case on the wire.
+	CollaborationMode json.RawMessage `json:"collaborationMode,omitempty"`
+	// MultiAgentMode is deprecated upstream and always
+	// "explicitRequestOnly".
+	MultiAgentMode json.RawMessage `json:"multiAgentMode,omitempty"`
+	Personality    *Personality    `json:"personality"`
+}
+
+// ThreadSettingsUpdatedNotification is the params payload of
+// `thread/settings/updated`.
+type ThreadSettingsUpdatedNotification struct {
+	ThreadId       string          `json:"threadId"`
+	ThreadSettings json.RawMessage `json:"threadSettings"`
+}
+
+// Settings decodes the snapshot. ThreadSettings stays raw on the
+// notification so fields added upstream survive for callers that
+// re-decode it.
+func (n ThreadSettingsUpdatedNotification) Settings() (ThreadSettings, error) {
+	var s ThreadSettings
+	err := json.Unmarshal(n.ThreadSettings, &s)
+	return s, err
+}
 
 // ConfigWarningNotification is the params payload of `configWarning` —
 // codex found something wrong in config.toml. Path and Range locate the

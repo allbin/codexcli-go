@@ -111,3 +111,73 @@ func clientInfoFromTranscript(entries []transcriptEntry) schema.ClientInfo {
 	}
 	return schema.ClientInfo{Name: "codexcli_capture", Version: "0.0.1"}
 }
+
+// TestTranscript_EffortSettingsReadBack replays a codex 0.153.4 capture of
+// a turn/start carrying effort "high" on a connection that negotiated
+// experimentalApi. Codex answered with thread/settings/updated just before
+// the turn/start response, so the typed event must reach the turn's stream
+// ahead of TurnStartedEvent. The capture's hook/* frames came from the
+// recording machine's hooks.json and were dropped when scrubbing.
+func TestTranscript_EffortSettingsReadBack(t *testing.T) {
+	entries, err := LoadTranscript("testdata/effort_settings_turn.jsonl")
+	if err != nil {
+		t.Fatalf("load transcript: %v", err)
+	}
+	exec := NewTranscriptFixtureExecutor(t, entries)
+	client := NewWithExecutor(exec, WithExperimentalAPI(), WithEphemeralThread(),
+		WithClientInfo(clientInfoFromTranscript(entries)))
+
+	ctx := context.Background()
+	conn, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+	thread, err := conn.NewThread(ctx)
+	if err != nil {
+		t.Fatalf("NewThread: %v", err)
+	}
+	if got := thread.Response().ReasoningEffort; got == nil || *got != "medium" {
+		t.Errorf("thread/start ReasoningEffort = %v, want medium", got)
+	}
+
+	stream, err := thread.StartTurn(ctx, "Reply with exactly the text T1-high", WithEffort("high"))
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	defer stream.Close()
+
+	var settings *ThreadSettingsUpdatedEvent
+	var settingsBeforeStart bool
+	var unknown []string
+	turn, err := drainTurnObserving(stream, 5*time.Second, func(ev Event) {
+		switch e := ev.(type) {
+		case *ThreadSettingsUpdatedEvent:
+			settings = e
+		case *TurnStartedEvent:
+			settingsBeforeStart = settings != nil
+		case *UnknownEvent:
+			unknown = append(unknown, e.Method)
+		}
+	})
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if turn == nil || turn.Status != "completed" {
+		t.Fatalf("turn = %+v", turn)
+	}
+	if settings == nil {
+		t.Fatalf("no ThreadSettingsUpdatedEvent (unknown methods: %v)", unknown)
+	}
+	if settings.ThreadID != thread.ID || settings.Effort != "high" || settings.Model != "gpt-5.6-sol" {
+		t.Errorf("settings = %+v", settings)
+	}
+	if !settingsBeforeStart {
+		t.Error("ThreadSettingsUpdatedEvent arrived after TurnStartedEvent")
+	}
+	for _, m := range unknown {
+		if m == schema.MethodThreadSettingsUpdated {
+			t.Errorf("%s still surfaced as UnknownEvent", m)
+		}
+	}
+}

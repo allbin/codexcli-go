@@ -161,6 +161,34 @@ func (e *ConfigWarningEvent) String() string {
 	return fmt.Sprintf("ConfigWarningEvent{%s}", e.Summary)
 }
 
+// ThreadSettingsUpdatedEvent corresponds to `thread/settings/updated`: the
+// settings the thread's next turn runs with. It is the read-back for a
+// sticky change such as a turn/start that carried WithEffort or WithModel.
+//
+// Codex 0.153.4 sends it only to connections opened with
+// WithExperimentalAPI, only when a value actually changed, and just
+// before the turn/start response. Without experimentalApi nothing
+// reports the effort in force, so track what you last sent (see
+// WithEffort).
+//
+// Effort, Summary, and ServiceTier are empty when codex reports null.
+// SettingsRaw keeps the full threadSettings object; decode it with
+// schema.ThreadSettings for cwd, approval, and sandbox fields.
+type ThreadSettingsUpdatedEvent struct {
+	ThreadID      string
+	Model         string
+	ModelProvider string
+	Effort        string
+	Summary       string
+	ServiceTier   string
+	SettingsRaw   []byte
+}
+
+func (*ThreadSettingsUpdatedEvent) event() {}
+func (e *ThreadSettingsUpdatedEvent) String() string {
+	return fmt.Sprintf("ThreadSettingsUpdatedEvent{Thread: %s, Model: %s, Effort: %s}", e.ThreadID, e.Model, e.Effort)
+}
+
 // DeprecationNoticeEvent corresponds to `deprecationNotice` — codex
 // announcing that a protocol surface is going away. Log these: they are
 // the earliest signal that this SDK needs updating for a newer CLI.

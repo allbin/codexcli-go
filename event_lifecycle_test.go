@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+
+	"github.com/allbin/codexcli-go/schema"
 )
 
 // newDispatchConn builds a Conn wired only far enough to route
@@ -191,6 +193,59 @@ func TestDispatch_DeprecationNotice(t *testing.T) {
 		t.Fatal("want *DeprecationNoticeEvent")
 	}
 	if ev.Summary == "" || ev.Details != "use data" {
+		t.Errorf("got %+v", ev)
+	}
+}
+
+// TestDispatch_ThreadSettingsUpdated pins the read-back for sticky turn
+// settings, using the payload shape codex 0.153.4 sends after a turn/start
+// that changed the effort. Null summary and service tier must decode to
+// empty strings, and the raw object must survive for the untyped fields.
+func TestDispatch_ThreadSettingsUpdated(t *testing.T) {
+	c, sub := newDispatchConn(t, "t1")
+	c.dispatchNotification("thread/settings/updated", json.RawMessage(
+		`{"threadId":"t1","threadSettings":{"cwd":"/w","approvalPolicy":"on-request",
+		  "approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"},
+		  "activePermissionProfile":null,"model":"gpt-5.6-sol","modelProvider":"openai",
+		  "serviceTier":null,"effort":"high","summary":null,
+		  "collaborationMode":{"mode":"default","settings":{"model":"gpt-5.6-sol","reasoning_effort":"high","developer_instructions":null}},
+		  "multiAgentMode":"explicitRequestOnly","personality":"pragmatic"}}`))
+
+	ev, ok := recvEvent(t, sub).(*ThreadSettingsUpdatedEvent)
+	if !ok {
+		t.Fatal("want *ThreadSettingsUpdatedEvent")
+	}
+	if ev.ThreadID != "t1" || ev.Effort != "high" || ev.Model != "gpt-5.6-sol" || ev.ModelProvider != "openai" {
+		t.Errorf("got %+v", ev)
+	}
+	if ev.Summary != "" || ev.ServiceTier != "" {
+		t.Errorf("Summary = %q, ServiceTier = %q, want empty for null", ev.Summary, ev.ServiceTier)
+	}
+
+	var full schema.ThreadSettings
+	if err := json.Unmarshal(ev.SettingsRaw, &full); err != nil {
+		t.Fatalf("SettingsRaw does not decode as schema.ThreadSettings: %v", err)
+	}
+	if full.Cwd != "/w" || full.ApprovalsReviewer != schema.ApprovalsReviewerUser ||
+		full.Personality == nil || *full.Personality != schema.PersonalityPragmatic {
+		t.Errorf("full settings = %+v", full)
+	}
+}
+
+// TestDispatch_ThreadSettingsUpdatedSurvivesReshape guards the narrow
+// decode: a field this event does not promote changing shape upstream
+// must not drop the notification.
+func TestDispatch_ThreadSettingsUpdatedSurvivesReshape(t *testing.T) {
+	c, sub := newDispatchConn(t, "t1")
+	c.dispatchNotification("thread/settings/updated", json.RawMessage(
+		`{"threadId":"t1","threadSettings":{"cwd":{"path":"/w"},"approvalsReviewer":{"kind":"user"},
+		  "model":"m","modelProvider":"openai","effort":"low"}}`))
+
+	ev, ok := recvEvent(t, sub).(*ThreadSettingsUpdatedEvent)
+	if !ok {
+		t.Fatal("want *ThreadSettingsUpdatedEvent")
+	}
+	if ev.Effort != "low" || ev.Model != "m" {
 		t.Errorf("got %+v", ev)
 	}
 }
