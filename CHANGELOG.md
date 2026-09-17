@@ -11,17 +11,44 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.3.2`).
+or pin a specific version (e.g. `@v0.4.0`).
 
 ## [Unreleased]
 
-A typed read-back for reasoning-effort and other sticky turn settings, and
-documentation of how a live effort change actually behaves, verified
+## [0.4.0] - 2026-09-17
+
+`Update` now updates an npm-global install when it can prove the npm it runs
+writes the tree `PATH` executes, and `InstallInfo.SelfManaged` reports that
+verdict. Also a typed read-back for reasoning-effort and other sticky turn
+settings, and documentation of how a live effort change behaves, verified
 against codex 0.153.4 by reading `reasoning.effort` off the model requests
-codex sends. No behaviour changes to what the SDK sends on the wire.
+codex sends. No change to what the SDK sends on the wire.
 
 ### Added
 
+- **`Update` acts for a proven npm-global install** (npm, unix). It runs
+  `<prefix>/bin/npm`, the npm beside the node that owns
+  `lib/node_modules/@openai/codex`, never one found on `PATH`, with
+  `<prefix>/bin` first on the child's `PATH`. It acts only when that npm's
+  `npm prefix -g` holds the same package root the `PATH` entry resolves
+  into. It resolves `npm view @openai/codex@latest version`, runs nothing
+  when that is installed, otherwise installs that exact version, and
+  requires the `PATH` entry to report it afterwards: a clean npm exit
+  without that version is `ErrUpdateFailed`. Preflight probes
+  `<prefix>/lib/node_modules` and `<prefix>/bin`; a failure is
+  `ErrUpdateNotWritable`. A prefix mismatch or anything unresolvable stays
+  `ErrManualUpdate`. pnpm, bun, Homebrew, winget, version-manager roots and
+  unknown installs are unchanged.
+- **`InstallInfo.SelfManaged`**, set by `Client.DetectInstall` from the same
+  check `Update` makes: true for the standalone install and for an npm-global
+  install that is proven and writable. For npm-global installs detection now
+  runs `npm prefix -g` and a write probe.
+- **`ManualUpdateError.Reason`** names the step of the npm proof that refused.
+- **`UpdateResult.Updater`**, the executable that ran (`codex` or the prefix's
+  npm). `UpdateResult.Path` stays the codex binary whose version is reported.
+- **`npm_update_live_test.go`** (build tag `integration`) checks the proof
+  against the codex on `PATH`; `CODEXCLI_LIVE_NPM_UPDATE=1` also runs the
+  update.
 - **`ThreadSettingsUpdatedEvent`** decodes `thread/settings/updated`. It
   carries typed `ThreadID`, `Model`, `ModelProvider`, `Effort`, `Summary`,
   and `ServiceTier` (empty for null) plus `SettingsRaw`, the full snapshot.
@@ -398,7 +425,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/allbin/codexcli-go/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/allbin/codexcli-go/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/allbin/codexcli-go/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/allbin/codexcli-go/compare/v0.2.0...v0.3.0
