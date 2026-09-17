@@ -46,6 +46,11 @@ type ManualUpdateError struct {
 	// Method is the detected install method that this package will not update.
 	Method InstallMethod
 
+	// Reason says why an npm-global install was refused — which step of the
+	// prefix proof in [Update] failed. "" for methods never updated here.
+	// Diagnostic prose, not a command.
+	Reason string
+
 	// Command is what the user has to run, verbatim and ready to display — or
 	// "" when no command is known to be correct.
 	//
@@ -98,14 +103,17 @@ func (e *UpdateNotWritableError) Is(target error) bool { return target == ErrUpd
 func (e *UpdateNotWritableError) Unwrap() error { return e.Err }
 
 // ErrUpdateFailed matches the error returned by [Update] when the updater ran
-// and exited non-zero, or could not be started at all.
+// and exited non-zero, could not be started at all, or — for an npm-global
+// install — exited 0 without the version moving while a newer one was asked
+// for.
 var ErrUpdateFailed = errors.New("codexcli: codex update failed")
 
 // UpdateFailedError reports that the updater ran and failed. The
 // [UpdateResult] is still returned alongside it, so the before/after versions
 // and the captured output are available for diagnosis.
 type UpdateFailedError struct {
-	// Path is the binary that was executed.
+	// Path is the updater that was executed: the codex PATH entry, or the npm
+	// inside the install's own prefix.
 	Path string
 
 	// ExitCode is the updater's exit status, or -1 when it never ran to
@@ -121,6 +129,9 @@ type UpdateFailedError struct {
 
 func (e *UpdateFailedError) Error() string {
 	msg := fmt.Sprintf("codexcli: %s update exited %d", e.Path, e.ExitCode)
+	if e.ExitCode == 0 && e.Err != nil {
+		return msg + ": " + e.Err.Error()
+	}
 	if tail := lastOutputLine(e.Output); tail != "" {
 		msg += ": " + tail
 	}
@@ -143,14 +154,19 @@ func (e *UpdateFailedError) Unwrap() error { return e.Err }
 // machine at all. It reports the success of *launching* an update, not of
 // applying one. Believe the version, not the status.
 type UpdateResult struct {
-	// Method is the install method that was updated. Always one codex manages
-	// itself — see [Update] for why that is only [InstallNative].
+	// Method is the install method that was updated: [InstallNative], or
+	// [InstallNPMGlobal] when the npm prefix was proven. See [Update].
 	Method InstallMethod
 
-	// Path is the binary that was executed — the PATH entry recorded by
-	// detection, never a fresh lookup and never the symlink target. See
+	// Path is the codex binary whose version is reported — the PATH entry
+	// recorded by detection, never a fresh lookup and never the symlink
+	// target. For a standalone install it is also the binary executed. See
 	// [Update] on why that layer.
 	Path string
+
+	// Updater is the executable that was run: Path for a standalone install,
+	// `<prefix>/bin/npm` for an npm-global one.
+	Updater string
 
 	// VersionBefore is what the CLI reported for itself before the run, or ""
 	// when that probe failed.
@@ -215,22 +231,31 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 	return func(o *updateOptions) { o.timeout = d }
 }
 
-// Update runs `codex update` for the install on PATH, using the default
-// client's binary.
+// Update updates the codex install on PATH, using the default client's
+// binary.
 //
-// # Only the standalone install
+// # The standalone install, and a proven npm install
 //
-// Detection runs first and decides. [InstallNative] — codex's own standalone
-// installer layout under CODEX_HOME — is the only method this package updates.
+// Detection runs first and decides. Two methods are updated:
+//
+//   - [InstallNative] — codex's own standalone installer layout under
+//     CODEX_HOME — by running `codex update`.
+//   - [InstallNPMGlobal] owned by npm, on unix, when the npm update target is
+//     proven to be the tree PATH runs (below) — by running
+//     `<prefix>/bin/npm install -g @openai/codex@latest`.
+//
 // Every other install is refused with a [ManualUpdateError] carrying
-// [InstallInfo.UpdateCmd] verbatim for the user to run. That refusal is a
-// normal outcome, not a failure: it is the answer for most installs in the
-// wild.
+// [InstallInfo.UpdateCmd] verbatim for the user to run: pnpm, bun, Homebrew,
+// winget, a version-manager root with no package metadata, an unknown binary,
+// and any npm install the proof does not hold for. That refusal is a normal
+// outcome, not a failure. [InstallInfo.SelfManaged] is computed by the same
+// check, so it is true exactly when this function does not refuse.
 //
-// Note this is narrower than what `codex update` itself will attempt. Verified
-// against codex 0.148.0, it also acts for a node-managed install by shelling
-// out to `npm install -g @openai/codex` (or the pnpm/bun equivalent), and that
-// is deliberately not driven from here:
+// # Why npm is not driven through `codex update`
+//
+// Verified against codex 0.148.0, `codex update` also acts for a node-managed
+// install by shelling out to `npm install -g @openai/codex` (or the pnpm/bun
+// equivalent). That is still not what runs here:
 //
 //   - The prefix it writes is not necessarily the prefix being run. codex
 //     reports both, as [DoctorInstallation.ManagedPackageRoot] and
@@ -238,11 +263,30 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //     and when they do, the "update" installs a second copy whose visibility
 //     depends on PATH order. A library that owns the codex command must not
 //     create that state on a user's machine.
-//   - It needs a package manager on PATH that a server generally does not
-//     have, and codex does not check: with npm absent it still exits 0 and
-//     prints "Update ran successfully!".
+//   - It finds npm on PATH, which a service generally does not have the
+//     right one of, and codex does not check: with npm absent it still exits
+//     0 and prints "Update ran successfully!".
 //
-// So for those installs the honest answer is the command, not the attempt.
+// # The npm proof
+//
+// An npm-global install is updated only when all of this holds, and is manual
+// otherwise:
+//
+//   - The resolved binary sits under `<prefix>/lib/node_modules/@openai/codex`
+//     with a package.json naming the CLI.
+//   - `<prefix>/bin/npm` and `<prefix>/bin/node` exist and are executable. npm
+//     is taken from there — the node that owns the package — and never looked
+//     up on PATH. Under fnm that is `…/node-versions/<v>/installation/bin/npm`,
+//     which exists even when the per-shell `fnm_multishells` directory does
+//     not.
+//   - That npm, run with `<prefix>/bin` first on PATH and otherwise the
+//     subprocess environment the install would run with (so .npmrc and
+//     npm_config_* count), reports a `npm prefix -g` whose
+//     `lib/node_modules/@openai/codex` resolves to the same directory as the
+//     package root PATH runs.
+//
+// A mismatch is the known failure mode — a second copy whose visibility
+// depends on PATH order — and is refused as manual, not attempted.
 //
 // # Which binary is executed
 //
@@ -265,18 +309,25 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //
 // # Preflight, then verify
 //
-// The directories codex's standalone installer writes into are probed for
-// writability first, and a failure there returns [ErrUpdateNotWritable]
-// without running anything — a consumer renders "cannot update" differently
-// from "update failed". These are not the directory holding the binary on
-// PATH: the installer unpacks into
-// `<CODEX_HOME>/packages/standalone/releases` and rewrites the visible symlink
-// in `$CODEX_INSTALL_DIR` (default `~/.local/bin`) on every run, whichever
-// directory PATH actually reaches the CLI through.
+// The directories the updater writes into are probed for writability first,
+// and a failure there returns [ErrUpdateNotWritable] without running anything
+// — a consumer renders "cannot update" differently from "update failed". For a
+// standalone install these are not the directory holding the binary on PATH:
+// the installer unpacks into `<CODEX_HOME>/packages/standalone/releases` and
+// rewrites the visible symlink in `$CODEX_INSTALL_DIR` (default
+// `~/.local/bin`) on every run, whichever directory PATH actually reaches the
+// CLI through. For npm they are `<prefix>/lib/node_modules` and the
+// `<prefix>/bin` link directory. (An unwritable npm prefix makes
+// [InstallInfo.SelfManaged] false, so a consumer keying on it shows the
+// command instead.)
 //
 // Afterwards the version is re-read, because the exit code cannot be trusted;
 // see [UpdateResult]. On failure the result is returned alongside the error,
 // because a half-run update still has before/after numbers worth rendering.
+// For npm the version to install is resolved first with the prefix's own
+// `npm view @openai/codex@latest version` and pinned: when it equals the
+// installed version nothing runs, and after a clean npm exit the PATH entry
+// must report exactly that version, or the run is [ErrUpdateFailed].
 //
 // The caller's context deadline is honoured. Without one the run is bounded by
 // [WithUpdateTimeout], defaulting to ten minutes. On unix a cancelled run is
@@ -330,25 +381,37 @@ type updateEnv struct {
 	// `codex` symlink, which it rewrites on every run.
 	binDir string
 
-	writable  func(dir string) error
-	runUpdate func(ctx context.Context, binary string, onLine func(string)) (int, error)
+	// npmLatest runs `<npm> view @openai/codex@latest version` with binDir
+	// first on PATH, so the registry npm is configured for answers.
+	npmLatest func(ctx context.Context, npm, binDir string) (string, error)
+
+	runUpdate func(ctx context.Context, run updaterRun, onLine func(string)) (int, error)
+}
+
+// updaterRun is one updater invocation: the executable, its arguments, and a
+// directory to put first on the child's PATH ("" for none).
+type updaterRun struct {
+	name    string
+	args    []string
+	pathDir string
 }
 
 func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) updateEnv {
 	return updateEnv{
-		installEnv: osInstallEnv(codexHome),
+		installEnv: osInstallEnv(codexHome).withChildEnv(childEnv, workDir),
 		binDir:     standaloneBinDir(childEnv),
-		writable:   checkWritable,
-		runUpdate: func(ctx context.Context, binary string, onLine func(string)) (int, error) {
-			return execUpdate(ctx, binary, buildEnv(childEnv), workDir, onLine)
+		npmLatest: func(ctx context.Context, npm, binDir string) (string, error) {
+			return runNPMLatest(ctx, npm, binDir, childEnv, workDir)
+		},
+		runUpdate: func(ctx context.Context, run updaterRun, onLine func(string)) (int, error) {
+			overrides := childEnv
+			if run.pathDir != "" {
+				overrides = withPathPrefix(childEnv, run.pathDir)
+			}
+			return execUpdater(ctx, run.name, run.args, buildEnv(overrides), workDir, onLine)
 		},
 	}
 }
-
-// selfManaged reports whether `codex update` owns this install in the narrow
-// sense this package acts on. See [Update] for why the node package managers
-// are excluded even though codex will attempt them.
-func selfManaged(m InstallMethod) bool { return m == InstallNative }
 
 func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateOption) (*UpdateResult, error) {
 	var o updateOptions
@@ -360,11 +423,28 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 	if err != nil {
 		return nil, err
 	}
-	if !selfManaged(info.Method) {
+
+	var (
+		run     updaterRun
+		targets []string
+		npm     *npmUpdatePlan
+	)
+	switch info.Method {
+	case InstallNative:
+		run = updaterRun{name: info.Path, args: []string{"update"}}
+		targets = updateTargets(info, env)
+	case InstallNPMGlobal:
+		plan, err := proveNPMUpdate(ctx, info, env.installEnv)
+		if err != nil {
+			return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd, Reason: err.Error()}
+		}
+		npm = plan
+		run = updaterRun{name: plan.npm, pathDir: plan.binDir}
+		targets = plan.targets
+	default:
 		return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd}
 	}
 
-	targets := updateTargets(info, env)
 	if len(targets) == 0 {
 		return nil, &UpdateNotWritableError{
 			Method: info.Method,
@@ -372,7 +452,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 		}
 	}
 	for _, dir := range targets {
-		if err := env.writable(dir); err != nil {
+		if err := probeWritable(env.installEnv, dir); err != nil {
 			return nil, &UpdateNotWritableError{Method: info.Method, Dir: dir, Err: err}
 		}
 	}
@@ -398,26 +478,62 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 		}
 	}
 
-	start := time.Now()
-	exitCode, runErr := env.runUpdate(ctx, info.Path, onLine)
-	elapsed := time.Since(start)
-
-	after, probeErr := reprobeVersion(ctx, info.Path, env.installEnv)
-
 	result := &UpdateResult{
 		Method:        info.Method,
 		Path:          info.Path,
+		Updater:       run.name,
 		VersionBefore: info.Version,
-		VersionAfter:  after,
-		Changed:       info.Version != "" && after != "" && info.Version != after,
-		ExitCode:      exitCode,
-		Output:        strings.Join(ring.lines(), "\n"),
-		Duration:      elapsed,
 	}
+	start := time.Now()
+	finish := func() {
+		result.Output = strings.Join(ring.lines(), "\n")
+		result.Duration = time.Since(start)
+	}
+
+	// npm installs whatever it is told to, current or not, so the version to
+	// install is resolved first and pinned. That makes the re-read an exact
+	// check: after a clean exit the PATH entry must report that version.
+	var want string
+	if npm != nil {
+		onLine("Resolving " + CLIPackageName + "@latest")
+		latest, err := env.npmLatest(ctx, npm.npm, npm.binDir)
+		if err == nil && latest == "" {
+			err = errors.New("npm reported no version")
+		}
+		if err != nil {
+			onLine(err.Error())
+			result.ExitCode = -1
+			finish()
+			return result, &UpdateFailedError{
+				Path:     npm.npm,
+				ExitCode: -1,
+				Output:   result.Output,
+				Err:      fmt.Errorf("resolve %s@latest: %w", CLIPackageName, err),
+			}
+		}
+		if latest == info.Version {
+			onLine(fmt.Sprintf("%s %s is already the latest version", CLIPackageName, latest))
+			result.VersionAfter = info.Version
+			finish()
+			return result, nil
+		}
+		want = latest
+		run.args = []string{"install", "--global", CLIPackageName + "@" + latest}
+		onLine(fmt.Sprintf("Installing %s@%s into %s", CLIPackageName, latest, npm.prefix))
+	}
+
+	exitCode, runErr := env.runUpdate(ctx, run, onLine)
+	finish()
+
+	after, probeErr := reprobeVersion(ctx, info.Path, env.installEnv)
+
+	result.VersionAfter = after
+	result.Changed = info.Version != "" && after != "" && info.Version != after
+	result.ExitCode = exitCode
 
 	if runErr != nil {
 		failed := &UpdateFailedError{
-			Path:     info.Path,
+			Path:     run.name,
 			ExitCode: exitCode,
 			Output:   result.Output,
 			Err:      runErr,
@@ -429,7 +545,26 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 	if probeErr != nil {
 		return result, fmt.Errorf("codexcli: update ran but the installed version could not be re-read, so nothing confirms it applied: %w", probeErr)
 	}
+	if want != "" && after != want {
+		// npm exited 0, but the binary PATH runs does not report what it was
+		// told to install. Believe the version.
+		return result, &UpdateFailedError{
+			Path:     run.name,
+			ExitCode: exitCode,
+			Output:   result.Output,
+			Err:      fmt.Errorf("installed %s@%s, but %s reports %q", CLIPackageName, want, info.Path, after),
+		}
+	}
 	return result, nil
+}
+
+// probeWritable runs the environment's writability check. A missing check is
+// a refusal, never a pass.
+func probeWritable(env installEnv, dir string) error {
+	if env.writable == nil {
+		return errors.New("no writability check available")
+	}
+	return env.writable(dir)
 }
 
 // reprobeVersion re-reads the installed version after an update.
@@ -564,7 +699,8 @@ func nearestExistingDir(dir string) (string, error) {
 	return "", fmt.Errorf("no existing ancestor of %s could be found", dir)
 }
 
-// execUpdate runs `<binary> update`, forwarding every output line to onLine as
+// execUpdater runs an updater — `<codex> update` or `<prefix>/bin/npm install
+// --global …` — forwarding every output line to onLine as
 // it arrives.
 //
 // On unix, cancellation interrupts rather than kills: the installer traps
@@ -575,8 +711,8 @@ func nearestExistingDir(dir string) (string, error) {
 // only reaches processes on the caller's own console), so cancellation there
 // is an immediate job-object tree kill: no grace period, but no orphaned
 // children either.
-func execUpdate(ctx context.Context, binary string, env []string, workDir string, onLine func(string)) (int, error) {
-	cmd := exec.CommandContext(ctx, binary, "update")
+func execUpdater(ctx context.Context, name string, args []string, env []string, workDir string, onLine func(string)) (int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
 	if workDir != "" {
 		cmd.Dir = workDir

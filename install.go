@@ -119,6 +119,16 @@ type InstallInfo struct {
 	// Method is how the binary at RealPath was installed.
 	Method InstallMethod
 
+	// SelfManaged is true when [Update] acts for this install rather than
+	// returning a [ManualUpdateError]: the standalone layout, or an npm-global
+	// install whose update target is proven to be the tree PATH runs and is
+	// writable by this process. It comes from the same check Update makes, so
+	// a consumer can key an "Update" button on it. See [Update] for the proof.
+	//
+	// Only [Client.DetectInstall] sets it. It costs an `npm prefix -g` run
+	// (a node startup, no network) for npm-global installs only.
+	SelfManaged bool
+
 	// UpdateCmd is the command to show the user, or "" when no command is
 	// known to be correct. Never treat "" as "use npm" — see the doc on
 	// DetectInstall for why guessing is worse than saying nothing.
@@ -208,11 +218,13 @@ var defaultInstallClient = New()
 //
 // # What it does
 //
-// Detection is read-only and offline: it resolves the binary with
-// exec.LookPath and filepath.EvalSymlinks, reads package metadata next to the
-// resolved path, resolves codex's standalone-install symlink under CODEX_HOME,
-// and runs `codex --version`. It starts no session, writes nothing, and makes
-// no network calls. Notably it does not shell out to `codex doctor`, which
+// Detection is offline: it resolves the binary with exec.LookPath and
+// filepath.EvalSymlinks, reads package metadata next to the resolved path,
+// resolves codex's standalone-install symlink under CODEX_HOME, and runs
+// `codex --version`. For an npm-global install it also runs the prefix's own
+// `npm prefix -g` and creates and removes a probe file in the npm prefix, to
+// decide InstallInfo.SelfManaged. It starts no session, leaves nothing behind,
+// and makes no network calls. Notably it does not shell out to `codex doctor`, which
 // reports a superset of these facts but spends ~400ms of network to do it —
 // see [Doctor] if you want that report and can pay for it.
 //
@@ -246,6 +258,10 @@ var defaultInstallClient = New()
 // preferred over `codex update`: it is the same action, but it names the
 // prefix being written and works even when the shim is broken.
 //
+// UpdateCmd is what to show a user. It is not what [Update] runs: for an npm
+// install whose prefix is proven, Update runs the prefix's own npm by absolute
+// path instead, and InstallInfo.SelfManaged says whether it will.
+//
 // The Homebrew command (`brew upgrade --cask codex`) and the cask name come
 // from codex's own binary. Homebrew and winget layouts are classified from the
 // path only — codex 0.148.0 itself reports "other" for them on Linux, and no
@@ -274,13 +290,15 @@ func DetectInstall(ctx context.Context, opts ...Option) (*InstallInfo, error) {
 // WithCodexHome (client default or per-call) relocates the CODEX_HOME lookup.
 func (c *Client) DetectInstall(ctx context.Context, opts ...Option) (*InstallInfo, error) {
 	resolved := resolveOptions(c.defaults, opts)
-	info, err := detectInstall(ctx, c.binaryPath(), osInstallEnv(resolved.codexHome))
+	env := osInstallEnv(resolved.codexHome).withChildEnv(resolved.env, resolved.workDir)
+	info, err := detectInstall(ctx, c.binaryPath(), env)
 	if err != nil {
 		return nil, err
 	}
+	info.SelfManaged = installSelfManaged(ctx, info, env)
 	c.log().Debug("detect install",
 		"path", info.Path, "realPath", info.RealPath, "version", info.Version,
-		"method", info.Method, "source", info.Source, "updateCmd", info.UpdateCmd,
+		"method", info.Method, "source", info.Source, "selfManaged", info.SelfManaged, "updateCmd", info.UpdateCmd,
 		"versionManager", info.VersionManager, "packageManager", info.PackageManager,
 		"configMethod", info.ConfigMethod, "configMismatch", info.ConfigMismatch)
 	return info, nil
@@ -304,6 +322,13 @@ type installEnv struct {
 	readFile    func(string) ([]byte, error) // small files: package.json, .modules.yaml
 	runVersion  func(ctx context.Context, binary string) (string, error)
 	codexHome   string // WithCodexHome, else $CODEX_HOME, else ~/.codex
+
+	// npmPrefix runs `<npm> prefix -g` with binDir first on PATH. Only an
+	// npm-global install whose update is being proven calls it.
+	npmPrefix func(ctx context.Context, npm, binDir string) (string, error)
+
+	// writable reports whether this process could write into dir.
+	writable func(dir string) error
 }
 
 func osInstallEnv(codexHomeOverride string) installEnv {
@@ -319,7 +344,21 @@ func osInstallEnv(codexHomeOverride string) installEnv {
 		readFile:    readSmallFile,
 		runVersion:  runVersionProbe,
 		codexHome:   home,
+		npmPrefix: func(ctx context.Context, npm, binDir string) (string, error) {
+			return runNPMPrefix(ctx, npm, binDir, nil, "")
+		},
+		writable: checkWritable,
 	}
+}
+
+// withChildEnv returns env with the npm prefix probe run under the subprocess
+// overrides ([WithEnv], [WithWorkDir]) — the environment an npm update would
+// run under, and so the one whose npm config decides where it writes.
+func (e installEnv) withChildEnv(overrides map[string]string, workDir string) installEnv {
+	e.npmPrefix = func(ctx context.Context, npm, binDir string) (string, error) {
+		return runNPMPrefix(ctx, npm, binDir, overrides, workDir)
+	}
+	return e
 }
 
 // maxInstallFileSize caps reads of package.json and .modules.yaml so a

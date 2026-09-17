@@ -53,15 +53,15 @@ func fakeUpdateEnv(t *testing.T) *updateEnvStub {
 			readFile:   func(string) ([]byte, error) { return nil, os.ErrNotExist },
 			runVersion: func(context.Context, string) (string, error) { return "0.148.0", nil },
 			codexHome:  fakeCodexHome,
+			writable: func(dir string) error {
+				stub.probed = append(stub.probed, dir)
+				return nil
+			},
 		},
 		binDir: fakeBinDir,
-		writable: func(dir string) error {
-			stub.probed = append(stub.probed, dir)
-			return nil
-		},
-		runUpdate: func(_ context.Context, binary string, onLine func(string)) (int, error) {
+		runUpdate: func(_ context.Context, run updaterRun, onLine func(string)) (int, error) {
 			stub.ran = true
-			stub.ranBinary = binary
+			stub.ranBinary = run.name
 			onLine("Updating Codex CLI")
 			return 0, nil
 		},
@@ -276,7 +276,7 @@ func TestRunUpdate_VerifiesByVersionNotExitCode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stub := fakeUpdateEnv(t)
 			stub.env.runVersion = versionSequence(tt.versions...)
-			stub.env.runUpdate = func(_ context.Context, _ string, onLine func(string)) (int, error) {
+			stub.env.runUpdate = func(_ context.Context, _ updaterRun, onLine func(string)) (int, error) {
 				onLine("Update ran successfully!")
 				return tt.exitCode, nil
 			}
@@ -341,7 +341,7 @@ func TestRunUpdate_FailedRunReturnsResultAlongsideError(t *testing.T) {
 	stub := fakeUpdateEnv(t)
 	stub.env.runVersion = versionSequence("0.148.0", "0.148.0")
 	exitErr := errors.New("exit status 1")
-	stub.env.runUpdate = func(_ context.Context, _ string, onLine func(string)) (int, error) {
+	stub.env.runUpdate = func(_ context.Context, _ updaterRun, onLine func(string)) (int, error) {
 		onLine("Downloading Codex CLI")
 		onLine("curl: (6) Could not resolve host: releases.openai.com")
 		return 1, exitErr
@@ -374,7 +374,7 @@ func TestRunUpdate_FailedRunReturnsResultAlongsideError(t *testing.T) {
 
 func TestRunUpdate_ProgressAndOutput(t *testing.T) {
 	stub := fakeUpdateEnv(t)
-	stub.env.runUpdate = func(_ context.Context, _ string, onLine func(string)) (int, error) {
+	stub.env.runUpdate = func(_ context.Context, _ updaterRun, onLine func(string)) (int, error) {
 		onLine("Detected platform: Linux (x64)")
 		onLine("Resolved version: 0.149.1")
 		return 0, nil
@@ -592,19 +592,6 @@ func TestLastOutputLine(t *testing.T) {
 	}
 }
 
-func TestSelfManaged(t *testing.T) {
-	// codex will also shell out to npm/pnpm/bun for a node-managed install,
-	// but this package deliberately does not drive that. See Update's doc.
-	for _, m := range []InstallMethod{InstallNPMGlobal, InstallPackageManager, InstallVersionManager, InstallUnknown} {
-		if selfManaged(m) {
-			t.Errorf("selfManaged(%q) = true", m)
-		}
-	}
-	if !selfManaged(InstallNative) {
-		t.Error("selfManaged(native) = false")
-	}
-}
-
 // fakeCodexScript writes a shell script standing in for the codex CLI, so the
 // real exec path can be exercised on a machine with no codex installed.
 func fakeCodexScript(t *testing.T, body string) string {
@@ -630,7 +617,7 @@ exit 3
 `)
 
 	var got []string
-	code, err := execUpdate(context.Background(), script, os.Environ(), "",
+	code, err := execUpdater(context.Background(), script, []string{"update"}, os.Environ(), "",
 		func(line string) { got = append(got, line) })
 	if err == nil {
 		t.Fatal("err = nil, want the non-zero exit reported")
@@ -662,7 +649,7 @@ sleep 30
 
 	go func() {
 		defer close(done)
-		_, _ = execUpdate(ctx, script, os.Environ(), "", func(line string) {
+		_, _ = execUpdater(ctx, script, []string{"update"}, os.Environ(), "", func(line string) {
 			if strings.Contains(line, "started") {
 				once.Do(func() { close(started) })
 			}
