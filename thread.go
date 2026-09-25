@@ -128,8 +128,8 @@ func (t *Thread) startTurnInput(ctx context.Context, input []schema.UserInput, o
 }
 
 // callOpts returns a slice of Options that re-derive the current
-// resolved values. Used so per-call StartTurn options layer on top of
-// connection defaults.
+// resolved values. Used so per-call StartTurn and ResumeThread options
+// layer on top of connection defaults.
 func (o *options) callOpts() []Option {
 	out := []Option{}
 	if o.model != "" {
@@ -149,6 +149,9 @@ func (o *options) callOpts() []Option {
 	}
 	if o.turnExtra != nil {
 		out = append(out, WithTurnExtra(o.turnExtra))
+	}
+	if o.threadConfig != nil {
+		out = append(out, WithThreadConfig(o.threadConfig))
 	}
 	return out
 }

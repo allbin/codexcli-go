@@ -24,6 +24,7 @@ type options struct {
 	approvalsReviewer *schema.ApprovalsReviewer
 	sandbox           *schema.SandboxMode
 	threadExtra       map[string]any
+	threadConfig      map[string]any
 	ephemeral         *bool
 	devInstructions   string
 
@@ -161,6 +162,92 @@ func WithThreadExtra(extra map[string]any) Option {
 		for k, v := range extra {
 			o.threadExtra[k] = v
 		}
+	}
+}
+
+// WithThreadConfig overlays config.toml values for threads started or
+// resumed with these options. The map is sent as the `config` field of
+// thread/start and thread/resume; codex reads each top-level key the way
+// it reads a `-c key=value` override, so a key may be a dotted path
+// ("mcp_servers.agentique.url") or a plain key holding a nested object.
+// It is thread-scoped: turn/start carries no config.
+//
+// Repeated calls deep-merge, including client defaults from New with
+// call-time options: nested map[string]any values merge key by key and a
+// later non-map value replaces what was there. Keys are merged
+// literally, so a dotted key and the equivalent nested object do not
+// merge with each other. The maps are copied; later changes to the
+// caller's map have no effect. A connect-time config is also sent on
+// ResumeThread, merged with any config passed to that call.
+//
+// A "config" key set through WithThreadExtra replaces this map
+// wholesale, since Extra keys win over typed fields.
+//
+// Per-thread MCP servers are the main use. The config travels in the
+// JSON-RPC request on the subprocess's stdin, so unlike a `-c` argument
+// it never shows up in the process's argv (world-readable through
+// /proc/<pid>/cmdline), which makes it the channel for secrets such as a
+// bearer token:
+//
+//	WithThreadConfig(map[string]any{
+//		"mcp_servers": map[string]any{
+//			"agentique": map[string]any{
+//				"url": u,
+//				"http_headers": map[string]any{"Authorization": "Bearer " + tok},
+//			},
+//		},
+//	})
+//
+// A stdio server takes "command", "args" and "env" instead of "url". To
+// keep the secret out of the request as well, name an environment
+// variable with "bearer_token_env_var" (or "env_http_headers", header
+// name to variable name) and set that variable on the subprocess with
+// WithEnv.
+func WithThreadConfig(cfg map[string]any) Option {
+	snapshot := mergeConfig(nil, cfg)
+	return func(o *options) { o.threadConfig = mergeConfig(o.threadConfig, snapshot) }
+}
+
+// mergeConfig deep-merges src into dst and returns dst, allocating it
+// when nil. Values taken from src are copied, so dst never shares a
+// nested map or slice with src and later merges into dst cannot reach
+// back into it.
+func mergeConfig(dst, src map[string]any) map[string]any {
+	if dst == nil {
+		dst = make(map[string]any, len(src))
+	}
+	for k, v := range src {
+		if sm, ok := v.(map[string]any); ok {
+			if dm, ok := dst[k].(map[string]any); ok {
+				dst[k] = mergeConfig(dm, sm)
+				continue
+			}
+		}
+		dst[k] = copyConfigValue(v)
+	}
+	return dst
+}
+
+func copyConfigValue(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		return mergeConfig(nil, v)
+	case []any:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = copyConfigValue(e)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(v))
+		for k, e := range v {
+			out[k] = e
+		}
+		return out
+	case []string:
+		return append([]string(nil), v...)
+	default:
+		return v
 	}
 }
 
@@ -314,6 +401,7 @@ func (o *options) buildThreadStartParams() schema.ThreadStartParams {
 		ApprovalsReviewer: o.approvalsReviewer,
 		Sandbox:           o.sandbox,
 		Ephemeral:         o.ephemeral,
+		Config:            o.threadConfig,
 		Extra:             o.threadExtra,
 	}
 	if o.devInstructions != "" {
@@ -341,6 +429,7 @@ func (o *options) buildThreadResumeParams(threadID string) schema.ThreadResumePa
 		ApprovalPolicy:    o.approval,
 		ApprovalsReviewer: o.approvalsReviewer,
 		Sandbox:           o.sandbox,
+		Config:            o.threadConfig,
 		Extra:             o.threadExtra,
 	}
 	if o.devInstructions != "" {
