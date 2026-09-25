@@ -11,9 +11,48 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.4.0`).
+or pin a specific version (e.g. `@v0.5.0`).
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-09-25
+
+A typed per-thread config overlay, so a consumer can give each thread its
+own MCP servers, and a wrapper to read back which servers and tools a
+thread sees. Checked against codex 0.156.1 with an in-test MCP server.
+
+### Added
+
+- **`WithThreadConfig(cfg map[string]any) Option`** sets the `config` field
+  of `thread/start` and `thread/resume`, which codex applies like `-c`
+  overrides for that thread only. Repeated calls, client defaults
+  included, deep-merge: nested `map[string]any` values merge key by key, a
+  later non-map value wins. Inputs are copied. A connect-time config is
+  re-sent on `ResumeThread`. It is not sent on `turn/start`, and a
+  `"config"` key in `WithThreadExtra` still replaces it. The config travels
+  over stdin, never argv, so it can carry a bearer token.
+- **`Conn.ListMcpServerStatus(ctx, threadID)`** wraps `mcpServerStatus/list`
+  and follows pagination; `Conn.ListMcpServerStatusPage` sends one request.
+  New schema types: `McpServerStatus` (`Name`, `Tools`, `AuthStatus`,
+  `RuntimeStatus`, `ToolsError`, `ServerInfo`, `PluginId`, raw
+  `Resources`/`ResourceTemplates`/`ServerCapabilities`, `Raw`, and
+  `ToolNames()`), `McpTool`, `McpServerInfo`, `McpAuthStatus`,
+  `McpServerConnectionStatus`, `ListMcpServerStatusParams`/`Response`,
+  `McpServerStatusDetail`, and `MethodMcpServerStatusList`.
+- **`mcp_config_live_test.go`** (build tag `integration`) runs an in-test
+  streamable-HTTP MCP server in a sandboxed `CODEX_HOME`:
+  `go test -tags integration -run TestLive_ThreadConfig -count=1 -v .`
+
+### Documentation
+
+- **What codex 0.156.1 does with an MCP overlay.** A nested `mcp_servers`
+  overlay adds to the servers in `config.toml`. The token reached the server
+  as the `Authorization` header, appeared in no process cmdline, and was
+  written to no file under `CODEX_HOME`. Codex asks before every MCP tool
+  call with an `mcpServer/elicitation/request` (`WithServerRequestHandler`,
+  not `WithApprovalHandler`). An unanswered request fails the call, and so
+  does approval policy `never`. `default_tools_approval_mode = "approve"` on
+  the server runs its tools without asking.
 
 ## [0.4.0] - 2026-09-17
 
@@ -425,7 +464,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/allbin/codexcli-go/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/allbin/codexcli-go/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/allbin/codexcli-go/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/allbin/codexcli-go/compare/v0.3.0...v0.3.1
