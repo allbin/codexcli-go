@@ -14,9 +14,11 @@ import (
 // servers added through WithThreadConfig. An empty threadID lists the
 // servers from the process-level config only.
 //
-// Codex connects to MCP servers in the background after thread/start, so
-// an entry can report a RuntimeStatus of starting, or no tools yet, right
-// after NewThread. McpServerStatusEvent reports when each server is ready.
+// Codex connects to MCP servers in the background after thread/start.
+// Against codex 0.156.1 the first call after NewThread already listed a
+// local server's tools, in about 0.6s; a slow server may still report a
+// RuntimeStatus of starting or no tools. McpServerStatusEvent reports
+// when each server is ready.
 func (c *Conn) ListMcpServerStatus(ctx context.Context, threadID string) ([]schema.McpServerStatus, error) {
 	var all []schema.McpServerStatus
 	params := schema.ListMcpServerStatusParams{}

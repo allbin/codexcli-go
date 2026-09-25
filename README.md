@@ -287,6 +287,36 @@ Four things it deliberately will not get wrong:
 
 Verified end-to-end against codex 0.148.0 → 0.149.1 on a sandboxed `CODEX_HOME`: the real installer ran, the version moved, `Changed` came back true.
 
+## Per-thread MCP servers
+
+`WithThreadConfig` overlays `config.toml` values for the threads a connection starts or resumes. It is sent as the `config` field of `thread/start` and `thread/resume`, over the subprocess's stdin, so a secret in it never reaches argv the way a `-c key=value` argument would (`/proc/<pid>/cmdline` is world-readable).
+
+```go
+conn, err := codexcli.New().Connect(ctx, codexcli.WithThreadConfig(map[string]any{
+    "mcp_servers": map[string]any{
+        "agentique": map[string]any{
+            "url":          mcpURL,
+            "http_headers": map[string]any{"Authorization": "Bearer " + token},
+            // Run this server's tools without an approval round-trip.
+            "default_tools_approval_mode": "approve",
+        },
+    },
+}))
+thread, err := conn.NewThread(ctx)
+servers, err := conn.ListMcpServerStatus(ctx, thread.ID) // what this thread sees
+```
+
+Repeated `WithThreadConfig` calls, including client defaults from `New`, deep-merge: nested maps merge key by key, a later non-map value wins. A connect-time config is re-sent on `ResumeThread`. A `"config"` key in `WithThreadExtra` replaces the whole map. A stdio server takes `command`, `args` and `env` instead of `url`; `bearer_token_env_var` or `env_http_headers` plus `WithEnv` keeps the token out of the request too.
+
+`Conn.ListMcpServerStatus(ctx, threadID)` wraps `mcpServerStatus/list` and follows pagination. Each `schema.McpServerStatus` carries `Name`, `Tools` (by name; `ToolNames()` sorts them), `AuthStatus`, `RuntimeStatus`, `ToolsError`, `ServerInfo`, and `Raw`. Without a thread ID it lists only the process-level servers, not an overlay.
+
+Observed against codex 0.156.1 by `mcp_config_live_test.go` (in-test HTTP MCP stub, sandboxed `CODEX_HOME`, repeated runs):
+
+- The overlay adds to the servers `config.toml` defines; it does not replace them.
+- The token reached the MCP server as `Authorization: Bearer <token>`, appeared in no process's cmdline, and was written to no file under `CODEX_HOME` (rollout, sqlite, config.toml).
+- Threads on one connection, and on separate connections, each reached only their own server with their own token. A resumed thread gets only the config sent with `thread/resume`.
+- Codex asks before every MCP tool call, as an `mcpServer/elicitation/request` (`_meta.codex_approval_kind: "mcp_tool_call"`) that reaches `WithServerRequestHandler`, not `WithApprovalHandler`. Answer `{"action":"accept","content":{}}` to run it. Unanswered the call fails with "user rejected MCP tool call"; under approval policy `never` it fails with "MCP tool call requires approval, but approval policy is never". `default_tools_approval_mode = "approve"` on the server skips the ask under either policy.
+
 ## Skills
 
 Unlike Claude Code — which pushes a flat list of skill names on its init event — codex does not advertise skills at thread start. Discovery is an explicit pull via the `skills/list` RPC, so call `Conn.ListSkills` when you actually need the list (e.g. to populate a picker), not on every connect.
@@ -409,7 +439,7 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `rpc.go` | JSON-RPC 2.0 framing over line-delimited JSON. Outbound request/response correlation by id; inbound dispatch to notify + request callbacks. Error chain preservation. |
 | `executor.go` | `Executor` interface + `LocalExecutor`. Swap in fakes for tests or remote execution. Cancellation kills the whole process tree (codex + MCP servers + shell children): `Setpgid` + `kill(-pid, SIGTERM)` on unix, a kill-on-close job object + `TerminateJobObject` on Windows (`executor_windows.go`), where every spawn is also marked CREATE_NO_WINDOW. |
 | `shim.go` | Resolves npm's Windows `.cmd` shim to the `bin/codex.js` it wraps, so the executor can run node on it directly (os/exec refuses batch-file args it cannot safely escape). |
-| `option.go` | Functional options (`WithCwd`, `WithModel`, `WithEphemeralThread`, ...). Extras hatch via `WithThreadExtra` / `WithTurnExtra`. |
+| `option.go` | Functional options (`WithCwd`, `WithModel`, `WithEphemeralThread`, ...). Per-thread config overlay via `WithThreadConfig`. Extras hatch via `WithThreadExtra` / `WithTurnExtra`. |
 | `event.go` | Sealed `Event` interface + the turn/item lifecycle events. |
 | `event_lifecycle.go` | Thread-, plan-, and connection-level events added for codex 0.14x (status, plan, warnings, MCP startup, reroute). |
 | `stream.go` | `Stream` — channel-of-events with lifecycle tracking and `Wait()` for blocking callers. |
@@ -421,8 +451,9 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `published.go` | `LatestPublished` — the published version for an install's own release stream, in one HTTP request. Three-state verdict; never compares across streams. |
 | `update.go` | `Update` — runs codex's own updater for a standalone install, the prefix's own npm for a proven npm install, refuses the rest with the command to display, and verifies by re-reading the version. |
 | `npm_update.go` | The npm-global proof: the prefix's own npm, its `npm prefix -g` matched against the package root `PATH` runs, and the `SelfManaged` verdict shared with detection. |
+| `mcp.go` | `Conn.ListMcpServerStatus` / `Conn.ListMcpServerStatusPage` (live RPC). Per-thread MCP servers are configured with `WithThreadConfig`. |
 | `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
-| `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
+| `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`, `mcp.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
 | `cmd/codexdemo/` | End-to-end smoke test against the real codex CLI. |
 | `cmd/capture/` | Records live JSON-RPC transcripts for test fixtures. |

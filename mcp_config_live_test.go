@@ -89,6 +89,7 @@ func TestLive_ThreadConfigMcpServer(t *testing.T) {
 	}
 	stub.requireOnly(t, token)
 	conn.Close()
+	before := stub.hits()
 
 	// Resume in a fresh process with a new token set at connect time.
 	token2 := randomToken(t)
@@ -99,6 +100,11 @@ func TestLive_ThreadConfigMcpServer(t *testing.T) {
 	}
 	waitMcpTool(t, conn2, th.ID, "agentique", mcpStubTool)
 	stub2.requireOnly(t, token2)
+	// The resumed thread takes only the config sent with thread/resume:
+	// nothing replays the first overlay from the rollout.
+	if n := stub.hits(); n != before {
+		t.Errorf("first stub hit %d more time(s) after resume", n-before)
+	}
 	conn2.Close()
 
 	reportPersistence(t, home, token, token2)
@@ -546,6 +552,12 @@ func (s *mcpStub) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result})
+}
+
+func (s *mcpStub) hits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.auths)
 }
 
 func (s *mcpStub) toolCalls() int {

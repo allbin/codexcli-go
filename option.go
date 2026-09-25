@@ -203,6 +203,17 @@ func WithThreadExtra(extra map[string]any) Option {
 // variable with "bearer_token_env_var" (or "env_http_headers", header
 // name to variable name) and set that variable on the subprocess with
 // WithEnv.
+//
+// Observed against codex 0.156.1 (mcp_config_live_test.go): the nested
+// mcp_servers overlay adds to the servers config.toml defines rather than
+// replacing them; codex wrote the overlay, token included, to no file
+// under CODEX_HOME; and a resumed thread gets only the config sent with
+// thread/resume. Codex asks before every MCP tool call with an
+// mcpServer/elicitation/request (see WithServerRequestHandler) and fails
+// the call when nothing accepts it, or outright under approval policy
+// never. Setting the server's "default_tools_approval_mode" to "approve"
+// runs its tools without asking; codex also accepts "auto", "prompt" and
+// "writes".
 func WithThreadConfig(cfg map[string]any) Option {
 	snapshot := mergeConfig(nil, cfg)
 	return func(o *options) { o.threadConfig = mergeConfig(o.threadConfig, snapshot) }
