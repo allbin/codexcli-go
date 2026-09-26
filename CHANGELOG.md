@@ -11,9 +11,15 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.5.0`).
+or pin a specific version (e.g. `@v0.6.0`).
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-09-26
+
+Host-supplied skill directories: the `skills/extraRoots/set` RPC, which is
+the only way to hand codex a skill root config.toml cannot express.
+Semantics read from codex source at e72da2b, not yet observed live.
 
 ### Added
 
@@ -474,7 +480,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/allbin/codexcli-go/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/allbin/codexcli-go/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/allbin/codexcli-go/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/allbin/codexcli-go/compare/v0.3.1...v0.3.2
