@@ -2,6 +2,8 @@ package codexcli
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 
 	"github.com/allbin/codexcli-go/schema"
 )
@@ -50,6 +52,54 @@ func (c *Conn) SetSkillEnabledByName(ctx context.Context, name string, enabled b
 // enabled state after the write.
 func (c *Conn) SetSkillEnabledByPath(ctx context.Context, path string, enabled bool) (bool, error) {
 	return c.writeSkillsConfig(ctx, schema.SkillsConfigWriteParams{Enabled: enabled, Path: &path})
+}
+
+// SetSkillsExtraRoots registers host-supplied skill root directories via the
+// `skills/extraRoots/set` RPC. Codex scans each root for skill folders
+// (`<root>/<name>/SKILL.md`) alongside the roots config.toml defines, and
+// reports what it finds with scope "user". This is the only way to add a
+// skill directory at runtime: config.toml has no key for it.
+//
+// Semantics, read from codex source at commit e72da2b (2026-09-26):
+//
+//   - Connection-scoped, not thread-scoped. The roots live on the single
+//     HostSkillsService the ThreadManager owns
+//     (codex-rs/core/src/thread_manager.rs:781), so every thread on the
+//     connection sees them, including threads already started: the upstream
+//     test app-server/tests/suite/v2/host_skills.rs:102-111 sets roots after
+//     thread/start and the next turn on that thread carries the new skill.
+//   - Replace, not append. The handler assigns the list wholesale and drops
+//     the skills cache (codex-rs/ext/skills/src/host_service.rs:154-163). To
+//     add a root, resend the full set. An empty slice clears every runtime
+//     root; nil is sent as an empty array, since the field is required.
+//   - The server always follows the reply with a `skills/changed`
+//     notification (codex-rs/app-server/src/request_processors/
+//     catalog_processor.rs:605-609), which reaches subscribers as
+//     SkillsChangedEvent. Call it before thread/start when the first turn
+//     must see the skills, and re-run ListSkills afterwards if you hold a
+//     cached list.
+//
+// Every root must be an absolute path; upstream decodes them as
+// AbsolutePathBuf and rejects relative ones, so this method returns an error
+// before sending if any root fails filepath.IsAbs.
+func (c *Conn) SetSkillsExtraRoots(ctx context.Context, roots []string) error {
+	for i, r := range roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("%s: root %d (%q) is not an absolute path", schema.MethodSkillsExtraRootsSet, i, r)
+		}
+	}
+	if err := c.checkExited(); err != nil {
+		return err
+	}
+	if roots == nil {
+		roots = []string{}
+	}
+	params := schema.SkillsExtraRootsSetParams{ExtraRoots: roots}
+	var resp schema.SkillsExtraRootsSetResponse
+	if err := c.rpc.Request(ctx, schema.MethodSkillsExtraRootsSet, params, &resp); err != nil {
+		return c.promoteRPCError(schema.MethodSkillsExtraRootsSet, err)
+	}
+	return nil
 }
 
 func (c *Conn) writeSkillsConfig(ctx context.Context, params schema.SkillsConfigWriteParams) (bool, error) {

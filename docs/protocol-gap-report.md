@@ -53,7 +53,7 @@ The adapter's capability list is mostly wrong in the conservative direction. Fiv
 | ToolProgressTicks unsupported | **Unimplemented, not a limit** | `item/mcpToolCall/progress` covers MCP calls; for everything else claudecli-go *synthesizes* ticks from a ticker rather than waiting for the CLI — see parity section |
 | MaxTurns unsupported | **Genuine limit, but see `tokenBudget`** | No turn cap exists anywhere. `thread/goal/set` does offer a token budget with a `budgetLimited` terminal state `[schema]` |
 
-Coverage today: **8 of 144 client request methods**, **27 of 74 server notifications**,
+Coverage today: **12 of 144 client request methods**, **27 of 74 server notifications**,
 **7 of 11 server requests**.
 
 ---
@@ -521,16 +521,21 @@ enforcement behaviour on exhaustion is unconfirmed.
 
 ## Full inventory
 
-### Client requests — 10 of 144
+### Client requests — 12 of 144
 
 Everything not listed as supported is **missing** (no Go entry point, no types). Nothing is
 partially supported at the request level.
 
 **Supported**: `initialize`, `model/list`, `skills/list`, `skills/config/write`,
-`thread/start`, `thread/resume`, `turn/start`, `turn/interrupt`, `account/read`,
-`account/rateLimits/read`.
+`skills/extraRoots/set`, `mcpServerStatus/list`, `thread/start`, `thread/resume`,
+`turn/start`, `turn/interrupt`, `account/read`, `account/rateLimits/read`.
 
-**Missing, stable (88)**:
+`skills/extraRoots/set` (`Conn.SetSkillsExtraRoots`) replaces the runtime skill roots
+for the whole connection and is followed by `skills/changed`; read from codex source
+`ext/skills/src/host_service.rs:154` and `app-server/src/request_processors/catalog_processor.rs:595`
+at commit e72da2b `[unverified]` live.
+
+**Missing, stable (86)**:
 
 `account/login/cancel`, `account/login/start`, `account/logout`,
 `account/rateLimitResetCredit/consume`,
@@ -544,12 +549,12 @@ partially supported at the request level.
 `feedback/upload`, `fs/copy`, `fs/createDirectory`, `fs/getMetadata`, `fs/readDirectory`,
 `fs/readFile`, `fs/remove`, `fs/unwatch`, `fs/watch`, `fs/writeFile`, `hooks/list`,
 `marketplace/add`, `marketplace/remove`, `marketplace/upgrade`, `mcpServer/oauth/login`,
-`mcpServer/resource/read`, `mcpServer/tool/call`, `mcpServerStatus/list`,
+`mcpServer/resource/read`, `mcpServer/tool/call`,
 `modelProvider/capabilities/read`, `permissionProfile/list`, `plugin/install`,
 `plugin/installed`, `plugin/list`, `plugin/read`, `plugin/share/checkout`,
 `plugin/share/delete`, `plugin/share/list`, `plugin/share/save`,
 `plugin/share/updateTargets`, `plugin/skill/read`, `plugin/uninstall`, `review/start`,
-`skills/extraRoots/set`, `thread/approveGuardianDeniedAction`, `thread/archive`,
+`thread/approveGuardianDeniedAction`, `thread/archive`,
 `thread/compact/start`, `thread/delete`, `thread/fork`, `thread/goal/clear`,
 `thread/goal/get`, `thread/goal/set`, `thread/inject_items`, `thread/list`,
 `thread/loaded/list`, `thread/metadata/update`, `thread/name/set`, `thread/read`,

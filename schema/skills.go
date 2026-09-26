@@ -10,6 +10,10 @@ const (
 	// MethodSkillsConfigWrite is the `skills/config/write` request: toggle a
 	// skill's enabled state by name or path selector.
 	MethodSkillsConfigWrite = "skills/config/write"
+	// MethodSkillsExtraRootsSet is the `skills/extraRoots/set` request: replace
+	// the set of host-supplied skill root directories the server scans in
+	// addition to the config.toml layers.
+	MethodSkillsExtraRootsSet = "skills/extraRoots/set"
 	// MethodSkillsChanged is the `skills/changed` notification: watched local
 	// skill files changed; treat as an invalidation signal and re-run
 	// skills/list when fresh metadata is needed.
@@ -114,6 +118,17 @@ type SkillsConfigWriteParams struct {
 type SkillsConfigWriteResponse struct {
 	EffectiveEnabled bool `json:"effectiveEnabled"`
 }
+
+// SkillsExtraRootsSetParams is the `skills/extraRoots/set` request payload.
+// Upstream types each entry as AbsolutePathBuf, so every root must be an
+// absolute path; the server rejects relative ones at decode time. The
+// field is required on the wire: an empty (non-nil) slice clears the set.
+type SkillsExtraRootsSetParams struct {
+	ExtraRoots []string `json:"extraRoots"`
+}
+
+// SkillsExtraRootsSetResponse is the (empty) `skills/extraRoots/set` reply.
+type SkillsExtraRootsSetResponse struct{}
 
 // SkillsChangedNotification is the (empty) `skills/changed` payload.
 type SkillsChangedNotification struct{}

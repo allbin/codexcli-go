@@ -15,6 +15,16 @@ or pin a specific version (e.g. `@v0.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **`Conn.SetSkillsExtraRoots(ctx, roots)`** wraps `skills/extraRoots/set`, the
+  only way to give codex a skill directory config.toml does not know about.
+  Connection-scoped and replace-not-append per codex source at e72da2b; a
+  `skills/changed` notification follows each call. Roots must be absolute
+  and are checked client-side. New schema types
+  `SkillsExtraRootsSetParams` / `SkillsExtraRootsSetResponse` and the
+  `MethodSkillsExtraRootsSet` constant.
+
 ## [0.5.0] - 2026-09-25
 
 A typed per-thread config overlay, so a consumer can give each thread its

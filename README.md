@@ -349,6 +349,24 @@ stream, err := thread.StartTurnInput(ctx, []schema.UserInput{
 
 The low-level primitive `schema.SkillInput(name, path)` is also available, alongside `schema.MentionInput`, `schema.ImageInput`, and `schema.LocalImageInput` for the other per-turn input variants.
 
+### Host-supplied skill directories
+
+`config.toml` has no key for an extra skill directory; the only route is the `skills/extraRoots/set` RPC, wrapped by `Conn.SetSkillsExtraRoots`. Codex scans each root for `<root>/<name>/SKILL.md` and reports what it finds with scope `user`.
+
+```go
+if err := conn.SetSkillsExtraRoots(ctx, []string{"/srv/sessions/abc/skills"}); err != nil {
+    log.Fatal(err)
+}
+thread, err := conn.NewThread(ctx) // first turn sees the skills
+```
+
+Read from codex source (commit e72da2b, 2026-09-26), not yet observed live:
+
+- **Connection-scoped.** The roots sit on the one skills service the connection's thread manager owns, so every thread on the connection sees them, including threads already running: the next turn picks them up. A per-session directory therefore needs one connection per session; unlike `WithThreadConfig`, this cannot be isolated per thread.
+- **Replace, not append.** Each call assigns the whole list and drops codex's skills cache. Resend the full set to add a root; an empty or nil slice clears every runtime root.
+- **`skills/changed` follows every call**, delivered as `SkillsChangedEvent`. Re-run `Conn.ListSkills` afterwards if you hold a cached list.
+- **Roots must be absolute.** Codex rejects relative paths at decode time; the wrapper checks `filepath.IsAbs` first and returns an error naming the offending root without sending anything.
+
 Toggle a skill's enabled state with `Conn.SetSkillEnabledByName(ctx, name, enabled)` or `Conn.SetSkillEnabledByPath(ctx, path, enabled)` (use the path form to disambiguate when a name is visible from multiple scopes). Both return the *effective* enabled state after the write, which can differ from the requested value if another config layer overrides it.
 
 When a turn is started with a skill input, codex echoes it back inside the `userMessage` thread item — `item.UserMessageContent()` decodes the content blocks (text/skill/mention/image) as the `UserInput` union, so a consumer rendering "what was sent" can see the skill block, not just the text.
@@ -452,7 +470,7 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `update.go` | `Update` — runs codex's own updater for a standalone install, the prefix's own npm for a proven npm install, refuses the rest with the command to display, and verifies by re-reading the version. |
 | `npm_update.go` | The npm-global proof: the prefix's own npm, its `npm prefix -g` matched against the package root `PATH` runs, and the `SelfManaged` verdict shared with detection. |
 | `mcp.go` | `Conn.ListMcpServerStatus` / `Conn.ListMcpServerStatusPage` (live RPC). Per-thread MCP servers are configured with `WithThreadConfig`. |
-| `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` (live RPCs) and the `SkillInput(meta)` convenience. |
+| `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` / `Conn.SetSkillsExtraRoots` (live RPCs) and the `SkillInput(meta)` convenience. |
 | `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`, `mcp.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
 | `cmd/genschema/` | `go generate` target that runs `codex app-server generate-json-schema` to refresh the raw schema bundle for diffing. |
 | `cmd/codexdemo/` | End-to-end smoke test against the real codex CLI. |

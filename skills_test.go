@@ -3,6 +3,7 @@ package codexcli
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -346,5 +347,57 @@ func TestConnSetSkillEnabled_ByNameAndPath(t *testing.T) {
 	}
 	if !writes[1].Enabled {
 		t.Errorf("write[1].Enabled = false, want true")
+	}
+}
+
+func TestConnSetSkillsExtraRoots(t *testing.T) {
+	fix := NewBidiFixtureExecutor()
+	client := NewWithExecutor(fix, WithEphemeralThread())
+
+	var rawParams []json.RawMessage
+	go skillsServer(t, fix, map[string]func(id, params json.RawMessage){
+		schema.MethodSkillsExtraRootsSet: func(id, params json.RawMessage) {
+			rawParams = append(rawParams, params)
+			_ = fix.SendResponse(id, map[string]any{})
+		},
+	})
+
+	conn, err := client.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// A relative root is rejected client-side before anything hits the wire.
+	err = conn.SetSkillsExtraRoots(ctx, []string{"/abs/skills", "relative/skills"})
+	if err == nil {
+		t.Fatal("SetSkillsExtraRoots with relative root: want error, got nil")
+	}
+	for _, want := range []string{schema.MethodSkillsExtraRootsSet, `"relative/skills"`, "not an absolute path"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	if err := conn.SetSkillsExtraRoots(ctx, []string{"/host/skills", "/other/skills"}); err != nil {
+		t.Fatalf("SetSkillsExtraRoots: %v", err)
+	}
+	// nil clears: the required field must still be present, as [] not null.
+	if err := conn.SetSkillsExtraRoots(ctx, nil); err != nil {
+		t.Fatalf("SetSkillsExtraRoots(nil): %v", err)
+	}
+
+	// Exactly the two valid calls reached the server; the rejected one did not.
+	if len(rawParams) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(rawParams))
+	}
+	if got, want := string(rawParams[0]), `{"extraRoots":["/host/skills","/other/skills"]}`; got != want {
+		t.Errorf("params[0] = %s, want %s", got, want)
+	}
+	if got, want := string(rawParams[1]), `{"extraRoots":[]}`; got != want {
+		t.Errorf("params[1] = %s, want %s", got, want)
 	}
 }
