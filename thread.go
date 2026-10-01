@@ -117,7 +117,7 @@ func (t *Thread) StartTurnInput(ctx context.Context, input []schema.UserInput, o
 		}
 		for {
 			select {
-			case ev, ok := <-sub:
+			case ev, ok := <-sub.out:
 				if !ok {
 					return
 				}

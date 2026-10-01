@@ -11,9 +11,17 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.8.0`).
+or pin a specific version (e.g. `@v0.8.1`).
 
 ## [Unreleased]
+
+## [0.8.1] - 2026-10-01
+
+### Fixed
+
+- **v0.8.0 does not build** (`thread.go`: cannot receive from non-channel
+  `*subscription`): its tag missed one line of the subscription change.
+  v0.8.0 is retracted; use v0.8.1, which is v0.8.0 as intended.
 
 ## [0.8.0] - 2026-10-01
 
