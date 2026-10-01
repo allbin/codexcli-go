@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -165,7 +166,7 @@ func (c *Client) Run(ctx context.Context, prompt string, opts ...Option) (*Strea
 
 		for {
 			select {
-			case ev, ok := <-sub:
+			case ev, ok := <-sub.out:
 				if !ok {
 					return
 				}
@@ -199,10 +200,15 @@ type Conn struct {
 	requestDispatch func(string, json.RawMessage, json.RawMessage)
 
 	subsMu sync.Mutex
-	subs   map[string]chan Event // keyed by thread id
+	subs   map[string]*subscription // keyed by thread id
 
 	threadsMu sync.Mutex
 	threads   map[string]*Thread
+
+	// srvReqs holds the server requests a handler is still deciding, keyed
+	// by request id; see trackServerRequest.
+	srvReqMu sync.Mutex
+	srvReqs  map[string]*serverRequestState
 
 	// cmdOutput reconstructs commandExecution output from streamed
 	// deltas when WithAccumulatedOutput is set. Self-synchronized.
@@ -254,6 +260,12 @@ func (c *Conn) ExitError() *ProcessExitError {
 	return c.exitErr.Load()
 }
 
+// Done returns a channel that closes when the codex process has exited
+// and been reaped, whether or not a turn is running. ExitError is non-nil
+// once it is closed. Subscribed Streams receive their ProcessExitEvent
+// shortly after.
+func (c *Conn) Done() <-chan struct{} { return c.waitDone }
+
 // ProcessInfo returns a lightweight liveness snapshot for watchdogs.
 func (c *Conn) ProcessInfo() ProcessInfo {
 	ex := c.exitErr.Load()
@@ -267,31 +279,72 @@ func (c *Conn) ProcessInfo() ProcessInfo {
 	return info
 }
 
-// Ping checks whether the connection still appears alive. Codex app-server
-// does not currently expose a dedicated control round-trip, so this is a
-// local liveness probe rather than a protocol ping.
+// pingMethod is the request Ping sends. thread/loaded/list reads the
+// in-memory set of loaded threads: no disk, no network, no side effects.
+// On codex 0.159.3 it answered in under 2ms while idle, mid-generation,
+// with an approval pending, and during a 20s command that printed nothing.
+const pingMethod = "thread/loaded/list"
+
+// Ping sends a real request and reports whether codex answered within
+// timeout (a zero timeout means 5s). Codex app-server has no ping method,
+// so the probe is thread/loaded/list with limit 1.
+//
+// Any answer proves the request loop read stdin and wrote stdout, so an
+// error response counts as alive too, which keeps a codex without the
+// method working. Failure modes:
+//
+//   - ErrPingTimeout: the process is running but did not answer in time;
+//   - the process exited: its ProcessExitError;
+//   - the connection closed: ErrClosed;
+//   - ctx ended first: ctx.Err().
+//
+// If the write itself blocks because codex stopped reading stdin, Ping
+// still returns at the timeout, leaving a goroutine blocked in the write
+// until the process exits or the connection closes.
 func (c *Conn) Ping(ctx context.Context, timeout time.Duration) error {
 	if err := c.checkExited(); err != nil {
 		return err
 	}
 	if timeout <= 0 {
-		timeout = 1 * time.Second
+		timeout = 5 * time.Second
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.rpc.Request(pctx, pingMethod, map[string]any{"limit": 1}, nil)
+	}()
+	var err error
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.ctx.Done():
-		if err := c.checkExited(); err != nil {
-			return err
-		}
-		return ErrClosed
-	case <-timer.C:
-		return c.checkExited()
-	default:
-		return nil
+	case err = <-done:
+	case <-pctx.Done():
+		err = pctx.Err()
 	}
+	var rerr *rpcError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &rerr) && rerr.cause == nil:
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case errors.Is(err, context.DeadlineExceeded):
+		if ex := c.checkExited(); ex != nil {
+			return ex
+		}
+		return fmt.Errorf("codexcli: no answer to %s within %s: %w", pingMethod, timeout, ErrPingTimeout)
+	}
+	// The transport failed: stdout hit EOF or the connection closed. If
+	// the process is exiting, the reaper is about to classify it; report
+	// that rather than a bare EOF.
+	select {
+	case <-c.waitDone:
+		if ex := c.checkExited(); ex != nil {
+			return ex
+		}
+	case <-pctx.Done():
+	}
+	return c.promoteRPCError("ping", err)
 }
 
 // reapProcess runs in its own goroutine for the life of the Conn. It
@@ -332,18 +385,17 @@ func (c *Conn) reapProcess() {
 	c.deliverExitAndCloseSubs(exit)
 }
 
+// deliverExitAndCloseSubs queues the exit as each subscriber's last event
+// and closes it once everything before it has been read.
 func (c *Conn) deliverExitAndCloseSubs(exit *ProcessExitError) {
 	c.closeSubsOnce.Do(func() {
 		c.subsMu.Lock()
 		defer c.subsMu.Unlock()
-		for tid, ch := range c.subs {
+		for tid, sub := range c.subs {
 			if exit != nil {
-				select {
-				case ch <- &ProcessExitEvent{Err: exit}:
-				default:
-				}
+				sub.push(&ProcessExitEvent{Err: exit})
 			}
-			close(ch)
+			sub.finish()
 			delete(c.subs, tid)
 		}
 	})
@@ -423,6 +475,8 @@ func isThreadNotFoundError(err error) bool {
 	for _, needle := range []string{
 		"not found", "missing thread", "no such thread",
 		"unknown thread", "does not exist",
+		// codex 0.159.3: "no rollout found for thread id <uuid>"
+		"no rollout found",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
@@ -498,64 +552,55 @@ func (c *Conn) lookupThread(id string) *Thread {
 
 // --- subscription bookkeeping ---
 
-// subscribe makes a new channel the thread's only subscriber. A channel it
-// replaces is closed, so the Stream reading it ends rather than waiting
-// for events that now go elsewhere.
-func (c *Conn) subscribe(threadID string) <-chan Event {
+// subscribe makes a new subscription the thread's only subscriber. A
+// subscription it replaces is finished: its Stream gets what was already
+// queued and then ends, rather than waiting for events that now go
+// elsewhere. The caller reads sub.out and must unsubscribe when it stops.
+func (c *Conn) subscribe(threadID string) *subscription {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
 	if c.subs == nil {
-		c.subs = map[string]chan Event{}
+		c.subs = map[string]*subscription{}
 	}
 	if old, ok := c.subs[threadID]; ok {
-		close(old)
+		old.finish()
 	}
-	ch := make(chan Event, 64)
-	c.subs[threadID] = ch
-	return ch
+	sub := newSubscription()
+	c.subs[threadID] = sub
+	return sub
 }
 
-// unsubscribe closes sub if it is still the thread's subscriber. A sub
-// that a later subscribe replaced is already closed and left alone, so a
+// unsubscribe is the reader leaving: sub drops anything still queued and
+// its pump exits, whether or not sub is still the thread's subscriber. It
+// is removed from the thread only while it is the current one, so a
 // replaced Stream ending does not cut off its successor.
-func (c *Conn) unsubscribe(threadID string, sub <-chan Event) {
+func (c *Conn) unsubscribe(threadID string, sub *subscription) {
+	sub.cancel()
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
-	if ch, ok := c.subs[threadID]; ok && (<-chan Event)(ch) == sub {
-		close(ch)
+	if c.subs[threadID] == sub {
 		delete(c.subs, threadID)
 	}
 }
 
-// deliver holds subsMu across the send so unsubscribe cannot close ch
-// mid-send; the send never blocks, so holding the lock is cheap.
+// deliver queues ev for the thread's subscriber. It never blocks the read
+// loop and never drops an event.
 func (c *Conn) deliver(threadID string, ev Event) {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
-	ch := c.subs[threadID]
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- ev:
-	default:
-		// Drop on slow consumer; better to lose a notification than
-		// stall the read loop and block every other thread.
-		c.logger.Warn("codexcli: subscriber slow, dropping event", "threadID", threadID)
+	if sub := c.subs[threadID]; sub != nil {
+		sub.push(ev)
 	}
 }
 
-// broadcastEvent sends an event to every active subscriber. Used for
+// broadcastEvent queues an event for every active subscriber. Used for
 // connection-scoped notifications (rate limits, etc.) that aren't tied
 // to a specific thread.
 func (c *Conn) broadcastEvent(ev Event) {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
-	for _, ch := range c.subs {
-		select {
-		case ch <- ev:
-		default:
-		}
+	for _, sub := range c.subs {
+		sub.push(ev)
 	}
 }
 
@@ -584,6 +629,13 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 			if t := c.lookupThread(p.ThreadId); t != nil {
 				t.completedTurn(p.Turn.ID)
 			}
+			// A request the turn was waiting on cannot be answered once
+			// the turn is over; codex follows with serverRequest/resolved.
+			// A request whose turn is unknown ("") can only be the
+			// thread's one running turn's.
+			c.withdrawServerRequests(func(_ string, st *serverRequestState) bool {
+				return st.threadID == p.ThreadId && (st.turnID == "" || st.turnID == p.Turn.ID)
+			})
 			c.deliver(p.ThreadId, &TurnCompletedEvent{ThreadID: p.ThreadId, Turn: p.Turn})
 		}
 	case "item/started":
@@ -805,6 +857,12 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				"summary", ev.Summary, "details", ev.Details)
 			c.broadcastEvent(ev)
 		}
+	case schema.MethodServerRequestResolved:
+		var p schema.ServerRequestResolvedNotification
+		if err := json.Unmarshal(params, &p); err == nil && len(p.RequestID) > 0 {
+			key := requestKey(p.RequestID)
+			c.withdrawServerRequests(func(k string, _ *serverRequestState) bool { return k == key })
+		}
 	case "error":
 		var p schema.ErrorNotification
 		if err := json.Unmarshal(params, &p); err == nil {
@@ -835,28 +893,62 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 // Runs in its own goroutine per request so concurrent approvals don't
 // serialize the rpc read loop.
 func (c *Conn) dispatchServerRequest(method string, id json.RawMessage, params json.RawMessage) {
-	go c.handleServerRequest(method, id, params)
+	// Decode and register on the read loop, before anything after this
+	// request is read: a serverRequest/resolved right behind it must find
+	// it. The handler runs on its own goroutine.
+	req, decodeErr := decodeApprovalRequest(method, params)
+	threadID, turnID := serverRequestScope(method, req, params)
+	ctx, st := c.trackServerRequest(id, threadID, turnID)
+	go c.handleServerRequest(ctx, st, method, id, params, req, decodeErr)
 }
 
-func (c *Conn) handleServerRequest(method string, id json.RawMessage, params json.RawMessage) {
+// serverRequestScope returns the thread and turn a server request belongs
+// to. Legacy v1 approvals carry a call id, not a turn id, so their turn is
+// unknown ("").
+func serverRequestScope(method string, req ApprovalRequest, params json.RawMessage) (threadID, turnID string) {
+	switch {
+	case method == schema.MethodExecCommandApproval || method == schema.MethodApplyPatchApproval:
+		if req != nil {
+			return req.ThreadID(), ""
+		}
+	case req != nil:
+		return req.ThreadID(), req.TurnID()
+	}
+	var scope struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+	}
+	_ = json.Unmarshal(params, &scope)
+	return scope.ThreadID, scope.TurnID
+}
+
+func (c *Conn) handleServerRequest(ctx context.Context, st *serverRequestState, method string, id, params json.RawMessage, req ApprovalRequest, decodeErr error) {
+	defer st.cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("codexcli: server request handler panicked: %v", r)
 			c.logger.Error("codexcli: panic in server request handler", "method", method, "err", err)
-			c.broadcastEvent(&ErrorEvent{Err: err, Fatal: false})
-			_ = c.rpc.RespondError(id, -32000, err.Error())
+			if tid := st.threadID; tid != "" {
+				c.deliver(tid, &ErrorEvent{Err: err, Fatal: false})
+			} else {
+				c.broadcastEvent(&ErrorEvent{Err: err, Fatal: false})
+			}
+			if c.claimServerRequest(id, st) {
+				_ = c.rpc.RespondError(id, -32000, err.Error())
+			}
 		}
 	}()
 
-	req, err := decodeApprovalRequest(method, params)
-	if err != nil {
+	if decodeErr != nil {
 		c.logger.Error("codexcli: failed to decode approval params",
-			"method", method, "err", err)
-		_ = c.rpc.RespondError(id, -32602, "invalid approval params: "+err.Error())
+			"method", method, "err", decodeErr)
+		if c.claimServerRequest(id, st) {
+			_ = c.rpc.RespondError(id, -32602, "invalid approval params: "+decodeErr.Error())
+		}
 		return
 	}
 	if req != nil {
-		c.routeApproval(method, id, req)
+		c.routeApproval(ctx, st, method, id, req)
 		return
 	}
 
@@ -864,35 +956,29 @@ func (c *Conn) handleServerRequest(method string, id json.RawMessage, params jso
 	// answer via the generic handler when configured.
 	c.broadcastEvent(&UnknownServerRequestEvent{Method: method, Params: params})
 
-	if fn := c.options.serverRequestFunc; fn != nil {
-		ctx, cancel := context.WithCancel(c.ctx)
-		defer cancel()
-		result, err := fn(ctx, ServerRequest{Method: method, Params: params})
-		if err != nil {
-			_ = c.rpc.RespondError(id, -32000, "server request handler error: "+err.Error())
-			return
+	fn := c.options.serverRequestFunc
+	if fn == nil {
+		if c.claimServerRequest(id, st) {
+			_ = c.rpc.RespondError(id, -32601, "codexcli: server request method not implemented: "+method)
 		}
-		if len(result) == 0 {
-			result = json.RawMessage(`{}`)
-		}
-		_ = c.rpc.RespondRaw(id, result)
 		return
 	}
-	_ = c.rpc.RespondError(id, -32601, "codexcli: server request method not implemented: "+method)
+	result, err := fn(ctx, ServerRequest{Method: method, Params: params})
+	if !c.claimServerRequest(id, st) {
+		c.logger.Debug("codexcli: server request withdrawn by codex; not answering", "method", method)
+		return
+	}
+	if err != nil {
+		_ = c.rpc.RespondError(id, -32000, "server request handler error: "+err.Error())
+		return
+	}
+	if len(result) == 0 {
+		result = json.RawMessage(`{}`)
+	}
+	_ = c.rpc.RespondRaw(id, result)
 }
 
-func (c *Conn) routeApproval(method string, id json.RawMessage, req ApprovalRequest) {
-	defer func() {
-		if r := recover(); r != nil {
-			err := fmt.Errorf("codexcli: approval handler panicked: %v", r)
-			c.logger.Error("codexcli: panic in approval handler", "method", method, "err", err)
-			if tid := req.ThreadID(); tid != "" {
-				c.deliver(tid, &ErrorEvent{Err: err, Fatal: false})
-			}
-			_ = c.rpc.RespondError(id, -32000, err.Error())
-		}
-	}()
-
+func (c *Conn) routeApproval(ctx context.Context, st *serverRequestState, method string, id json.RawMessage, req ApprovalRequest) {
 	if tid := req.ThreadID(); tid != "" {
 		c.deliver(tid, &ApprovalRequestEvent{Request: req})
 	}
@@ -902,10 +988,11 @@ func (c *Conn) routeApproval(method string, id json.RawMessage, req ApprovalRequ
 		fn = DenyAll
 	}
 
-	ctx, cancel := context.WithCancel(c.ctx)
-	defer cancel()
-
 	decision, err := fn(ctx, req)
+	if !c.claimServerRequest(id, st) {
+		c.logger.Debug("codexcli: approval withdrawn by codex; not answering", "method", method)
+		return
+	}
 	if err != nil {
 		c.logger.Warn("codexcli: approval handler returned error",
 			"method", method, "err", err)
@@ -924,6 +1011,71 @@ func (c *Conn) routeApproval(method string, id json.RawMessage, req ApprovalRequ
 	}
 	if err := c.rpc.RespondRaw(id, body); err != nil {
 		c.logger.Warn("codexcli: failed to send approval response", "err", err)
+	}
+}
+
+// serverRequestState is a server request nobody has answered or withdrawn.
+// It lives in Conn.srvReqs until one side claims it: the handler to send
+// its answer (claimServerRequest), or codex by withdrawing it
+// (withdrawServerRequests). Exactly one wins, under srvReqMu.
+type serverRequestState struct {
+	threadID, turnID string
+	cancel           context.CancelFunc
+}
+
+// requestKey normalises a JSON-RPC id so the id on a request and the
+// requestId on serverRequest/resolved compare equal: 7 and "7" stay
+// distinct, whitespace does not matter.
+func requestKey(id json.RawMessage) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, id); err != nil {
+		return string(id)
+	}
+	return buf.String()
+}
+
+// trackServerRequest gives a server request its own context, cancelled
+// when codex withdraws the request, when the handler finishes, or when the
+// connection ends.
+func (c *Conn) trackServerRequest(id json.RawMessage, threadID, turnID string) (context.Context, *serverRequestState) {
+	ctx, cancel := context.WithCancel(c.ctx)
+	st := &serverRequestState{threadID: threadID, turnID: turnID, cancel: cancel}
+	c.srvReqMu.Lock()
+	if c.srvReqs == nil {
+		c.srvReqs = map[string]*serverRequestState{}
+	}
+	c.srvReqs[requestKey(id)] = st
+	c.srvReqMu.Unlock()
+	return ctx, st
+}
+
+// claimServerRequest reports whether the handler may still answer: true
+// at most once, and never after codex withdrew the request.
+func (c *Conn) claimServerRequest(id json.RawMessage, st *serverRequestState) bool {
+	c.srvReqMu.Lock()
+	defer c.srvReqMu.Unlock()
+	key := requestKey(id)
+	if c.srvReqs[key] != st {
+		return false
+	}
+	delete(c.srvReqs, key)
+	return true
+}
+
+// withdrawServerRequests takes back every pending request match accepts,
+// so its answer is never sent, and cancels its handler's context.
+func (c *Conn) withdrawServerRequests(match func(key string, st *serverRequestState) bool) {
+	c.srvReqMu.Lock()
+	var hit []*serverRequestState
+	for key, st := range c.srvReqs {
+		if match(key, st) {
+			hit = append(hit, st)
+			delete(c.srvReqs, key)
+		}
+	}
+	c.srvReqMu.Unlock()
+	for _, st := range hit {
+		st.cancel()
 	}
 }
 

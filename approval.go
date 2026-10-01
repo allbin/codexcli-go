@@ -282,6 +282,21 @@ func (r RawDecision) marshalDecision(_ string) (json.RawMessage, error) {
 // consumers who forget to handle a kind don't accidentally approve).
 // Returning an error sends a JSON-RPC error response — the agent will
 // surface that as a tool failure.
+//
+// Each call gets its own ctx, cancelled when the request stops being
+// answerable:
+//
+//   - codex withdraws it with serverRequest/resolved, as it does after
+//     turn/interrupt (observed on codex 0.159.3: turn/completed with status
+//     interrupted, then serverRequest/resolved);
+//   - the turn the request belongs to (req.TurnID) completes;
+//   - the connection closes or the process exits.
+//
+// Take a prompt for a cancelled request off the screen; ctx.Err() is the
+// normal return then. When codex withdrew the request, or its turn ended,
+// the handler's result is discarded and nothing is sent. After a
+// connection close nothing can be sent anyway. ctx is not cancelled when
+// the request is answered normally.
 type ApprovalFunc func(ctx context.Context, req ApprovalRequest) (ApprovalDecision, error)
 
 // DenyAll is a ready-made ApprovalFunc that declines every request. Useful
@@ -302,6 +317,9 @@ type ServerRequest struct {
 // ServerRequestFunc handles non-approval server requests. Return value is the
 // raw JSON result body sent back to the server. Returning an error sends a
 // JSON-RPC error response.
+//
+// ctx is cancelled as described on ApprovalFunc. The turn is the request
+// params' turnId, when they carry one.
 type ServerRequestFunc func(ctx context.Context, req ServerRequest) (json.RawMessage, error)
 
 func decisionJSON(value string) (json.RawMessage, error) {

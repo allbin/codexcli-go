@@ -7,7 +7,7 @@ Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC
 ## Install
 
 ```
-go get github.com/allbin/codexcli-go@v0.7.0
+go get github.com/allbin/codexcli-go@v0.8.0
 ```
 
 Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md). Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
@@ -458,6 +458,33 @@ permissions approvals, and `""` for the legacy v1 (`execCommandApproval`,
 `applyPatchApproval`) kinds, which only carry a call id. Type-switch on the
 concrete request when you need kind-specific fields (the proposed command,
 diff, requested permissions, etc.).
+
+Each call gets its own context. It is cancelled when codex withdraws the
+request (`serverRequest/resolved`), when the request's turn completes, or
+when the connection closes. Interrupting a turn with an approval pending
+triggers the first two: codex 0.159.3 sends `turn/completed` with status
+`interrupted`, then `serverRequest/resolved`. Take the prompt off
+the screen when the context ends; the handler's return value for a
+withdrawn request is discarded. `WithServerRequestHandler` handlers get the
+same context.
+
+## Liveness
+
+`Conn.Ping` sends `thread/loaded/list` and waits for the answer, so a
+codex process that is running but no longer serving requests fails it
+with `ErrPingTimeout`. Codex answers it in about a millisecond while idle,
+mid-generation, with an approval pending, and while a command runs. Any
+answer, including an error response, counts as alive.
+
+Silence on the event stream proves nothing either way. While a command
+runs and prints nothing, codex sends no notifications at all until it
+finishes: no progress, no heartbeat. `item/mcpToolCall/progress` exists
+for MCP tools that report progress, and is not typed by this library yet
+(it arrives as `UnknownEvent`). Ping is the way to tell a long silent
+command from a wedged app-server.
+
+`Conn.Done()` closes when the process has exited, with `ExitError` set, so
+an idle connection with no Stream open can still learn that codex died.
 
 ## Command output
 

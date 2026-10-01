@@ -38,6 +38,10 @@ const (
 	// change to model, effort, or another sticky turn setting. Codex
 	// 0.153.4 only sends it on connections that negotiated experimentalApi.
 	MethodThreadSettingsUpdated = "thread/settings/updated"
+	// MethodServerRequestResolved: a server request is no longer pending,
+	// whether a client answered it or codex withdrew it (on turn/interrupt
+	// it follows turn/completed).
+	MethodServerRequestResolved = "serverRequest/resolved"
 )
 
 // ThreadSettings is the thread's full settings snapshot as reported by
@@ -200,4 +204,12 @@ type WarningNotification struct {
 type DeprecationNoticeNotification struct {
 	Summary string  `json:"summary"`
 	Details *string `json:"details,omitempty"`
+}
+
+// ServerRequestResolvedNotification is the `serverRequest/resolved`
+// payload. RequestID is the JSON-RPC id of the request, a number or a
+// string, kept raw so it compares equal to the request's id.
+type ServerRequestResolvedNotification struct {
+	ThreadID  string          `json:"threadId"`
+	RequestID json.RawMessage `json:"requestId"`
 }

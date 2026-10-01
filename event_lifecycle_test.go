@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/allbin/codexcli-go/schema"
 )
@@ -14,17 +15,17 @@ import (
 func newDispatchConn(t *testing.T, threadID string) (*Conn, <-chan Event) {
 	t.Helper()
 	c := &Conn{options: resolveOptions(nil, nil), logger: slog.New(discardHandler{})}
-	return c, c.subscribe(threadID)
+	return c, c.subscribe(threadID).out
 }
 
-// recvEvent pulls one event from the subscriber, failing if none is
-// buffered. Dispatch is synchronous, so a non-blocking read is enough.
+// recvEvent pulls one event from the subscriber, failing if none arrives.
+// Dispatch queues synchronously; the subscription's pump hands it over.
 func recvEvent(t *testing.T, ch <-chan Event) Event {
 	t.Helper()
 	select {
 	case ev := <-ch:
 		return ev
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("no event delivered")
 		return nil
 	}

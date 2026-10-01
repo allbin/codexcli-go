@@ -39,6 +39,10 @@ var (
 	// turn/steer and turn/start until that turn ends, so buffer the
 	// message and send it once the turn completes.
 	ErrTurnNotSteerable = errors.New("codexcli: active turn not steerable")
+	// ErrPingTimeout is returned by Conn.Ping when codex did not answer
+	// the probe request within the timeout: the process is running but
+	// its request loop is not responding.
+	ErrPingTimeout = errors.New("codexcli: ping timed out")
 )
 
 // classifyTurnInputError maps codex's rejections of turn/steer and

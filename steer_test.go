@@ -354,21 +354,21 @@ func TestSubscribe_ReplacedStreamEnds(t *testing.T) {
 	c := &Conn{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	a := c.subscribe("thr")
 	b := c.subscribe("thr")
-	if _, ok := <-a; ok {
+	if _, ok := <-a.out; ok {
 		t.Fatal("replaced subscriber still open")
 	}
 	c.unsubscribe("thr", a)
 	c.deliver("thr", &TurnStartedEvent{ThreadID: "thr"})
 	select {
-	case ev, ok := <-b:
+	case ev, ok := <-b.out:
 		if !ok || ev == nil {
 			t.Fatal("successor closed by the replaced subscriber's unsubscribe")
 		}
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("event not delivered to the successor")
 	}
 	c.unsubscribe("thr", b)
-	if _, ok := <-b; ok {
+	if _, ok := <-b.out; ok {
 		t.Fatal("unsubscribe left the subscriber open")
 	}
 }
@@ -396,4 +396,23 @@ func TestDeliver_RacesUnsubscribe(t *testing.T) {
 	}
 	close(stop)
 	<-done
+}
+
+// TestUnsubscribe_ReplacedAbandonedSubscription: a replaced subscription
+// with events queued and nobody reading still closes when its owner
+// unsubscribes, instead of its pump blocking forever.
+func TestUnsubscribe_ReplacedAbandonedSubscription(t *testing.T) {
+	c := &Conn{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	a := c.subscribe("thr")
+	for range 10 {
+		c.deliver("thr", &TurnStartedEvent{ThreadID: "thr"})
+	}
+	b := c.subscribe("thr")
+	c.unsubscribe("thr", a)
+	select {
+	case <-a.pumpDone:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned subscription's pump still blocked after unsubscribe")
+	}
+	c.unsubscribe("thr", b)
 }
