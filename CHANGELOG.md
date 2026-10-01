@@ -11,9 +11,75 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.7.0`).
+or pin a specific version (e.g. `@v0.8.0`).
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-10-01
+
+Robustness for long-running hosts: withdrawn approvals are cancelled, Ping
+makes a real round trip, and event delivery no longer drops events.
+Behaviour checked live against codex 0.159.3, three runs each.
+
+### Added
+
+- **Per-request handler contexts.** `ApprovalFunc` and `ServerRequestFunc`
+  each get their own ctx, cancelled when codex withdraws the request
+  (`serverRequest/resolved`), when the request's turn completes, or when
+  the connection closes. Before this the ctx was the connection's, so a
+  host that showed an approval prompt kept it after the user pressed Stop:
+  codex withdrew the request and nothing told the handler. A withdrawn
+  request's answer is never sent: the handler and the withdrawal claim the
+  request under one lock, so exactly one wins. Requests are registered on
+  the read loop, so a withdrawal in the very next frame still lands. A
+  legacy v1 approval, which carries a call id rather than a turn id, is
+  withdrawn when any turn on its thread completes. Codex 0.159.3 sends
+  `turn/completed` (interrupted) and then `serverRequest/resolved` on
+  interrupt.
+- **`Conn.Done()`** closes once the process has exited and `ExitError` is
+  set, so an idle connection with no Stream learns that codex died.
+- **`ErrPingTimeout`**, returned by `Ping` when codex does not answer.
+- `schema.MethodServerRequestResolved` and
+  `schema.ServerRequestResolvedNotification`. The notification is consumed
+  and no longer surfaces as an `UnknownEvent`.
+
+### Changed
+
+- **`Conn.Ping` round-trips.** It sends `thread/loaded/list` (limit 1),
+  an in-memory read, and returns nil on any answer, error responses
+  included. A running app-server that stops answering now fails with
+  `ErrPingTimeout` at the caller's timeout, and one whose process dies
+  mid-probe returns its `ProcessExitError`; before, Ping only checked the
+  process had not exited and passed a wedged app-server forever. Codex
+  answered in about 1ms idle, mid-generation, with an approval pending
+  and during a silent 15s command. A zero timeout now means 5s (was 1s).
+  If codex stops reading stdin, Ping still returns at the timeout and
+  leaves one goroutine blocked in the write until the process exits.
+- **Event delivery is lossless.** Each Stream's subscription is an
+  unbounded queue drained by its own goroutine; the read loop appends and
+  never blocks. Before, the reader dropped an event whenever 64 were
+  waiting, so a burst of output deltas could drop `turn/completed` and
+  leave a Stream open forever, or drop an `item/completed`. The
+  `ProcessExitEvent` is always the last event, after everything queued
+  before it. A consumer that stops reading without closing its Stream now
+  grows memory instead of losing events. Delivery to the subscriber is
+  asynchronous: an event is queued when the notification is read and
+  handed over by the pump.
+
+### Fixed
+
+- **`ResumeThread` returns `ErrThreadNotFound`** for codex 0.159.3's
+  "no rollout found for thread id …", which it answers for an unknown or
+  deleted thread. It was a generic error.
+
+### Notes
+
+- Codex sends nothing while a command runs silently: no progress and no
+  heartbeat until `item/completed`. `item/mcpToolCall/progress` (MCP tool
+  progress messages) and `item/commandExecution/terminalInteraction`
+  (stdin written to an interactive command) exist and are not typed yet;
+  both arrive as `UnknownEvent`. Neither is a liveness signal for a plain
+  command; use `Ping`.
 
 ## [0.7.0] - 2026-10-01
 
