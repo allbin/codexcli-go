@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume, turn lifecycle, approvals, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, aggregated diffs, MCP server startup status, and skills (discover, toggle, invoke). MCP elicitation, fork, dynamic tools, realtime/audio, and the file/exec/account/plugin RPC surfaces are not yet wired. Tested end-to-end against codex CLI 0.147.0; a normal turn produces no `UnknownEvent`. The [reasoning effort](#reasoning-effort) behaviour below was verified against 0.153.4.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits and account, aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
 
 ## Install
 
@@ -10,7 +10,7 @@ Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC
 go get github.com/allbin/codexcli-go@v0.9.0
 ```
 
-Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md). Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
+Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md) and the [GitHub releases](https://github.com/allbin/codexcli-go/releases). v0.8.0 is retracted (it does not build); use v0.8.1 or later. Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
 
 ## Quick start
 
@@ -685,6 +685,20 @@ Three changes need consumer action; the rest are additive.
   paths need a manual smoke test on real Windows: spawn a connection, cancel
   it, and confirm no survivors in Task Manager; same for a cancelled
   `Update`. The shim resolver itself is unit-tested on linux.
+
+## Releasing
+
+A release is all of these, in this order; a tag alone is not a release.
+
+1. `[Unreleased]` in `CHANGELOG.md` becomes `## [X.Y.Z] - YYYY-MM-DD` with an empty `[Unreleased]` above it, and the compare links at the bottom gain `[X.Y.Z]` (and `[Unreleased]` moves to `vX.Y.Z...HEAD`).
+2. `SDKVersion` in `version.go` and the version in the README install snippet and the CHANGELOG pin example become `X.Y.Z`.
+3. One commit, `release: vX.Y.Z`, on `master`.
+4. Build and test a clean checkout of that exact commit (`git worktree add --detach <dir> HEAD`, then `go build ./... && go vet -tags integration . && go test -race ./...`). v0.8.0 shipped unbuildable because the working tree passed and the commit did not.
+5. Annotated tag `vX.Y.Z` (message `vX.Y.Z`), then `git push origin master vX.Y.Z`.
+6. GitHub release on that tag, titled `vX.Y.Z — <short summary>`, notes = the CHANGELOG section, marked Latest:
+   `gh release create vX.Y.Z --title "vX.Y.Z — …" --notes-file <section.md> --latest`
+
+A broken tag is never moved or deleted: release a fixed patch version, add `retract vX.Y.Z` to `go.mod`, and mark the section `[YANKED]` in the CHANGELOG.
 
 ## Conventions
 
