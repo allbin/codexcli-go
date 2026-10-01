@@ -11,9 +11,57 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.6.0`).
+or pin a specific version (e.g. `@v0.7.0`).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-10-01
+
+Mid-turn messages over `turn/steer`, with distinct errors for "nothing to
+inject into" and "this turn refuses input". Checked live against codex
+0.159.3.
+
+### Added
+
+- **`Thread.SendMessage(ctx, prompt)` / `SendMessageWithInput(ctx, input)`**
+  add a user message to the running turn over `turn/steer`, with
+  `ActiveTurnID()` as `expectedTurnId`, and return that turn's id. The
+  message arrives as a `userMessage` item on the stream `StartTurn`
+  returned. Mirrors `claudecli-go.Session.SendMessage`.
+- **`ErrNoActiveTurn`**: no turn is running, or it ended before codex
+  received the message (`no active turn to steer`, or an
+  `expected active turn id` mismatch). Nothing was delivered.
+- **`ErrTurnNotSteerable`**: the running turn is a review or compaction
+  turn (`codexErrorInfo.activeTurnNotSteerable`). Returned by
+  `SendMessage`, and by `StartTurn`'s stream, since codex refuses
+  `turn/start` during those turns too.
+- `schema.TurnSteerParams`, `schema.TurnSteerResponse`,
+  `schema.MethodTurnSteer`.
+- `BidiFixtureExecutor.SendErrorResponseData` scripts an error response
+  with a `data` payload.
+- **`steer_live_test.go`** (build tag `integration`):
+  `go test -tags integration -run TestLive_SendMessage -count=1 -v .`
+
+### Changed
+
+- `StartTurn` documents that a `turn/start` while a turn is active folds
+  into that turn and returns its id. Use `SendMessage` mid-turn.
+- **A Stream replaced by a later `StartTurn` on the same thread now ends**
+  (`Wait` returns `ErrNoTurn`). It used to stay open with no events until
+  its context was cancelled, and cancelling it then closed the newer
+  Stream's subscription, so the newer Stream lost every event after that.
+
+### Fixed
+
+- **Send on a closing channel.** The reader delivered to a Stream's
+  channel outside the lock `unsubscribe` closes it under, so a Stream
+  closed by its context while a notification for its thread arrived could
+  panic the reader goroutine with "send on closed channel". Found by the
+  race detector.
+- **`ActiveTurnID` no longer revives a finished turn.** When a turn's
+  `turn/completed` was read before its `turn/start` response, the response
+  set the finished turn as active again, and `Interrupt` and `SendMessage`
+  then targeted it until the next turn started.
 
 ## [0.6.0] - 2026-09-26
 
