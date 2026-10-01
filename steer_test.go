@@ -118,9 +118,9 @@ func TestSendMessage_SteersRunningTurn(t *testing.T) {
 		w.replay(fix, firstAnswer+1, firstDone+1)
 
 		// SendMessage on the idle thread must not reach the server: the
-		// next request is the interrupt.
-		id, _ = expectRequest(t, fix, "turn/interrupt")
-		_ = fix.SendResponse(id, map[string]any{})
+		// next request is the ping.
+		id, _ = expectRequest(t, fix, pingMethod)
+		_ = fix.SendResponse(id, map[string]any{"data": []string{}, "nextCursor": nil})
 
 		w.replay(fix, firstDone+1, compactStarted+1)
 		id, raw = expectRequest(t, fix, schema.MethodTurnSteer)
@@ -180,8 +180,8 @@ func TestSendMessage_SteersRunningTurn(t *testing.T) {
 	if _, err := th.SendMessage(context.Background(), "late"); !errors.Is(err, ErrNoActiveTurn) {
 		t.Errorf("SendMessage after turn/completed = %v, want ErrNoActiveTurn", err)
 	}
-	if err := th.Interrupt(context.Background()); err != nil {
-		t.Fatalf("Interrupt: %v", err)
+	if err := th.conn.Ping(context.Background(), 2*time.Second); err != nil {
+		t.Fatalf("Ping: %v", err)
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -322,9 +322,9 @@ func TestStartTurn_CompletedBeforeResponse(t *testing.T) {
 		_ = fix.SendNotification("turn/started", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "inProgress")})
 		_ = fix.SendNotification("turn/completed", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "completed")})
 		_ = fix.SendResponse(id, map[string]any{"turn": turnFrame("turn_1", "inProgress")})
-		// The next request must be the interrupt, not a turn/steer.
-		id, _ = expectRequest(t, fix, "turn/interrupt")
-		_ = fix.SendResponse(id, map[string]any{})
+		// The next request must be the ping, not a turn/steer.
+		id, _ = expectRequest(t, fix, pingMethod)
+		_ = fix.SendResponse(id, map[string]any{"data": []string{}, "nextCursor": nil})
 		drainStrayFrames(fix)
 	}()
 	th := steerConn(t, fix)
@@ -343,8 +343,8 @@ func TestStartTurn_CompletedBeforeResponse(t *testing.T) {
 	if _, err := th.SendMessage(context.Background(), "late"); !errors.Is(err, ErrNoActiveTurn) {
 		t.Errorf("SendMessage = %v, want ErrNoActiveTurn", err)
 	}
-	if err := th.Interrupt(context.Background()); err != nil {
-		t.Fatalf("Interrupt: %v", err)
+	if err := th.conn.Ping(context.Background(), 2*time.Second); err != nil {
+		t.Fatalf("Ping: %v", err)
 	}
 }
 

@@ -101,38 +101,6 @@ func TestInterrupt_MidTurn(t *testing.T) {
 	checkGoroutineLeak(t, startGoroutines)
 }
 
-// TestInterrupt_NoActiveTurn confirms that calling Interrupt when no
-// turn is active still succeeds (the server handles it as a no-op).
-func TestInterrupt_NoActiveTurn(t *testing.T) {
-	fix := NewBidiFixtureExecutor()
-	client := NewWithExecutor(fix, WithEphemeralThread())
-
-	threadID := "thr_noturn"
-	go func() {
-		id, _ := expectRequest(t, fix, "initialize")
-		_ = fix.SendResponse(id, basicInitResponse())
-		expectNotification(t, fix, "initialized")
-		id, _ = expectRequest(t, fix, "thread/start")
-		_ = fix.SendResponse(id, basicThreadStartResponse(threadID))
-		id, _ = expectRequest(t, fix, "turn/interrupt")
-		_ = fix.SendResponse(id, map[string]any{})
-		drainStrayFrames(fix)
-	}()
-
-	conn, err := client.Connect(context.Background())
-	if err != nil {
-		t.Fatalf("Connect: %v", err)
-	}
-	defer conn.Close()
-	thread, err := conn.NewThread(context.Background())
-	if err != nil {
-		t.Fatalf("NewThread: %v", err)
-	}
-	if err := thread.Interrupt(context.Background()); err != nil {
-		t.Errorf("Interrupt: %v", err)
-	}
-}
-
 // runInterruptServer scripts a turn that emits two deltas then waits for
 // a turn/interrupt request to complete the turn with status=interrupted.
 func runInterruptServer(t *testing.T, fix *BidiFixtureExecutor, threadID, turnID string) {

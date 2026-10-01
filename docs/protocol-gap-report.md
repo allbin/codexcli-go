@@ -647,6 +647,12 @@ libraries are solving the same problem.
 
 ### 1. Child-thread visibility (subagent roster)
 
+**Shipped in v0.9.0** as `ChildThreadEvent`, `Thread.Children`, `Conn.ChildThread` and a
+cascading `Thread.Interrupt`. Observed on codex 0.159.3: the parent's interrupt does not
+stop children, `subAgentActivity` gained kind `completed`, and `thread/list` with
+`parentThreadId` or `ancestorThreadId` now requires `experimentalApi`, so `ListChildThreads`
+was not built.
+
 Unblocks a Codex agent roster in Agentique. Everything else on this list is smaller.
 
 Three separable pieces:

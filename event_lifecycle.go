@@ -28,6 +28,19 @@ func (e *ThreadStatusChangedEvent) String() string {
 	return fmt.Sprintf("ThreadStatusChangedEvent{Thread: %s, Status: %s}", e.ThreadID, e.Status)
 }
 
+// ThreadNameUpdatedEvent corresponds to `thread/name/updated`: the thread
+// was renamed, by Thread.SetName or by codex itself. Name is "" when the
+// name was cleared.
+type ThreadNameUpdatedEvent struct {
+	ThreadID string
+	Name     string
+}
+
+func (*ThreadNameUpdatedEvent) event() {}
+func (e *ThreadNameUpdatedEvent) String() string {
+	return fmt.Sprintf("ThreadNameUpdatedEvent{Thread: %s, Name: %q}", e.ThreadID, e.Name)
+}
+
 // TurnPlanUpdatedEvent corresponds to `turn/plan/updated` — the agent's
 // todo plan, resent in full on every change. Render Plan as-is; do not
 // try to diff against the previous event.

@@ -39,6 +39,10 @@ var (
 	// turn/steer and turn/start until that turn ends, so buffer the
 	// message and send it once the turn completes.
 	ErrTurnNotSteerable = errors.New("codexcli: active turn not steerable")
+	// ErrThreadEphemeral is returned by Thread.SetName for a thread started
+	// with WithEphemeralThread: codex 0.159.3 keeps no metadata for those
+	// ("ephemeral thread does not support metadata updates").
+	ErrThreadEphemeral = errors.New("codexcli: ephemeral thread has no metadata")
 	// ErrPingTimeout is returned by Conn.Ping when codex did not answer
 	// the probe request within the timeout: the process is running but
 	// its request loop is not responding.

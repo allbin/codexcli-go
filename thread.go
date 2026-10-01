@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/allbin/codexcli-go/schema"
@@ -56,15 +57,60 @@ func (t *Thread) completedTurn(id string) {
 	t.mu.Unlock()
 }
 
-// Interrupt cancels the in-flight turn on this thread. It returns once
-// the server acknowledges the turn/interrupt request; the resulting
-// `turn/completed` notification arrives on the active Stream with
-// status: "interrupted".
+// Interrupt cancels the in-flight turn on this thread and every subagent
+// turn running under it. It returns once the server acknowledges the
+// thread's own turn/interrupt; the resulting `turn/completed` arrives on
+// the active Stream with status: "interrupted".
 //
-// Safe to call with no active turn — the server returns success regardless.
+// Codex does not stop subagents when their parent's turn is interrupted:
+// on codex 0.159.3 the child kept running after the parent's turn ended
+// interrupted (observed live twice). So Interrupt first interrupts each
+// descendant's running turn, concurrently and each bounded by 3s so a
+// wedged child cannot hold up the rest, then the thread's own. Children
+// are the ones Children reports.
+//
+// With no active turn on the thread it sends nothing for the thread itself
+// and returns nil; codex 0.159.3 rejects a turn/interrupt without a turn id.
+//
+// Interrupt returns by ctx's deadline even if codex has stopped reading
+// stdin; a request write stuck that way stays blocked in a goroutine until
+// the connection closes.
 func (t *Thread) Interrupt(ctx context.Context) error {
+	t.conn.interruptDescendants(ctx, t.ID)
 	turnID := t.ActiveTurnID()
-	return t.conn.interrupt(ctx, t.ID, turnID)
+	if turnID == "" {
+		return t.conn.checkExited()
+	}
+	return t.conn.interruptBounded(ctx, t.ID, turnID)
+}
+
+// SetName sets the thread's name over thread/name/set, the title codex
+// shows in its own thread lists. Codex confirms with thread/name/updated,
+// which arrives as ThreadNameUpdatedEvent on an open Stream. It works with
+// or without a turn running; on a new thread that has not run a turn,
+// codex 0.159.3 answers at once but announces the name only when the
+// first turn starts. A blank name is rejected before sending, as
+// codex rejects an empty one; a thread codex has no record of returns
+// ErrThreadNotFound, and an ephemeral thread (WithEphemeralThread), which
+// codex keeps no metadata for, returns ErrThreadEphemeral.
+func (t *Thread) SetName(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("codexcli: thread name must not be blank")
+	}
+	if err := t.conn.checkExited(); err != nil {
+		return err
+	}
+	params := schema.ThreadSetNameParams{ThreadID: t.ID, Name: name}
+	if err := t.conn.rpc.Request(ctx, schema.MethodThreadNameSet, params, nil); err != nil {
+		if isThreadNotFoundError(err) {
+			return fmt.Errorf("%s %s: %w", schema.MethodThreadNameSet, t.ID, ErrThreadNotFound)
+		}
+		if strings.Contains(err.Error(), "ephemeral thread does not support") {
+			return fmt.Errorf("%s %s: %w", schema.MethodThreadNameSet, t.ID, ErrThreadEphemeral)
+		}
+		return t.conn.promoteRPCError(schema.MethodThreadNameSet, err)
+	}
+	return nil
 }
 
 // Response returns the server's thread/start payload (model resolution,

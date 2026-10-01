@@ -314,6 +314,20 @@ type ServerRequest struct {
 	Params json.RawMessage
 }
 
+// UserInput decodes a request_user_input request. ok is false for any
+// other method. Answer with schema.UserInputAnswers, keyed by question id,
+// or schema.UserInputDismissed when the user closes the question.
+func (r ServerRequest) UserInput() (params *schema.ToolRequestUserInputParams, ok bool, err error) {
+	if r.Method != schema.MethodToolRequestUserInput {
+		return nil, false, nil
+	}
+	var p schema.ToolRequestUserInputParams
+	if err := json.Unmarshal(r.Params, &p); err != nil {
+		return nil, true, fmt.Errorf("codexcli: decode %s: %w", r.Method, err)
+	}
+	return &p, true, nil
+}
+
 // ServerRequestFunc handles non-approval server requests. Return value is the
 // raw JSON result body sent back to the server. Returning an error sends a
 // JSON-RPC error response.

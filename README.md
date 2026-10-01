@@ -7,7 +7,7 @@ Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC
 ## Install
 
 ```
-go get github.com/allbin/codexcli-go@v0.8.1
+go get github.com/allbin/codexcli-go@v0.9.0
 ```
 
 Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md). Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
@@ -86,6 +86,54 @@ Do not use `StartTurn` for this. A `turn/start` while a turn is active does not 
 ```
 go test -tags integration -run TestLive_SendMessage -count=1 -v .
 ```
+
+## Subagents
+
+Codex subagents are separate threads on the same connection. A parent
+learns of one from a `subAgentActivity` item in its turn; the child never
+sends `thread/started`, and its first frame can arrive just before that
+item. The library holds frames from unnamed threads until a
+`subAgentActivity` names them, then delivers every child event on the root
+thread's Stream wrapped in `ChildThreadEvent`, which carries the child's
+thread id, parent, `agentPath` (`/root/alpha`), spawning tool-call id,
+spawn turn, and active turn. Grandchildren route to the same root.
+`Thread.Children()` and `Conn.ChildThread(id)` report the tree; an
+approval a child asks for reaches the handler with the child's thread id,
+so `Conn.ChildThread` says where it came from.
+
+Codex does not stop subagents when their parent's turn is interrupted: on
+0.159.3 the child kept running after the parent's turn ended `interrupted`.
+`Thread.Interrupt` therefore interrupts every descendant's running turn
+first, concurrently and 3s each at most, then the thread's own.
+
+Child events reach the root's current Stream only. Once the parent's turn
+completes its Stream ends, and a child still running after that has
+nowhere to deliver.
+
+## Thread names
+
+`Thread.SetName` sets the title codex keeps for a thread
+(`thread/name/set`), with or without a turn running; codex answers with
+`thread/name/updated`, surfaced as `ThreadNameUpdatedEvent`. A name set on
+a new thread before its first turn is announced when that turn starts.
+Ephemeral
+threads keep no metadata: codex refuses and `SetName` returns
+`ErrThreadEphemeral`.
+
+## Questions to the user (`request_user_input`)
+
+Codex's ask-the-user tool arrives as the server request
+`item/tool/requestUserInput` at the `WithServerRequestHandler` handler.
+`req.UserInput()` decodes it. Answer with
+`schema.UserInputAnswers(map[questionID][]string)`: one string per chosen
+option label or free-text answer. Keys must be the question ids; codex
+0.159.3 treats anything else, including `{"answers":{"text":"…"}}`, as no
+answer at all. To dismiss, return `schema.UserInputDismissed()`
+(`{"answers":{}}`); the model is told it got no answer and the turn goes
+on. The tool is only offered in the Plan collaboration mode
+(`turn/start` `collaborationMode {mode:"plan"}`, which needs
+`WithExperimentalAPI`) or with codex's underDevelopment feature
+`default_mode_request_user_input`.
 
 ## Reasoning effort
 

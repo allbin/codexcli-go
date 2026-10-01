@@ -210,6 +210,9 @@ type Conn struct {
 	srvReqMu sync.Mutex
 	srvReqs  map[string]*serverRequestState
 
+	// childReg tracks subagent threads; see subagent.go.
+	childReg childRegistry
+
 	// cmdOutput reconstructs commandExecution output from streamed
 	// deltas when WithAccumulatedOutput is set. Self-synchronized.
 	cmdOutput cmdOutputAccumulator
@@ -542,6 +545,7 @@ func (c *Conn) registerThread(t *Thread) {
 	}
 	c.threads[t.ID] = t
 	c.threadsMu.Unlock()
+	c.detachThread(t.ID)
 }
 
 func (c *Conn) lookupThread(id string) *Thread {
@@ -584,13 +588,17 @@ func (c *Conn) unsubscribe(threadID string, sub *subscription) {
 }
 
 // deliver queues ev for the thread's subscriber. It never blocks the read
-// loop and never drops an event.
+// loop and never drops an event for a subscribed thread. An event for a
+// subagent thread goes to its root thread's subscriber as a
+// ChildThreadEvent (routeUnsubscribed).
 func (c *Conn) deliver(threadID string, ev Event) {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
 	if sub := c.subs[threadID]; sub != nil {
 		sub.push(ev)
+		return
 	}
+	c.routeUnsubscribed(threadID, ev)
 }
 
 // broadcastEvent queues an event for every active subscriber. Used for
@@ -620,6 +628,8 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		if err := json.Unmarshal(params, &p); err == nil {
 			if t := c.lookupThread(p.ThreadId); t != nil {
 				t.setActiveTurn(p.Turn.ID)
+			} else {
+				c.noteForeignTurn(p.ThreadId, p.Turn.ID, true)
 			}
 			c.deliver(p.ThreadId, &TurnStartedEvent{ThreadID: p.ThreadId, Turn: p.Turn})
 		}
@@ -628,6 +638,8 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		if err := json.Unmarshal(params, &p); err == nil {
 			if t := c.lookupThread(p.ThreadId); t != nil {
 				t.completedTurn(p.Turn.ID)
+			} else {
+				c.noteForeignTurn(p.ThreadId, p.Turn.ID, false)
 			}
 			// A request the turn was waiting on cannot be answered once
 			// the turn is over; codex follows with serverRequest/resolved.
@@ -644,6 +656,9 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 			c.deliver(p.ThreadId, &ItemStartedEvent{
 				ThreadID: p.ThreadId, TurnID: p.TurnId, Item: p.Item, StartedAtMs: p.StartedAtMs,
 			})
+			if p.Item.Type == schema.ItemTypeSubAgentActivity {
+				c.noteSubAgent(p.ThreadId, p.TurnId, &p.Item)
+			}
 		}
 	case "item/completed":
 		var p schema.ItemCompletedNotification
@@ -655,6 +670,9 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				ThreadID: p.ThreadId, TurnID: p.TurnId, Item: p.Item,
 				CompletedAtMs: p.CompletedAtMs,
 			})
+			if p.Item.Type == schema.ItemTypeSubAgentActivity {
+				c.noteSubAgent(p.ThreadId, p.TurnId, &p.Item)
+			}
 		}
 	case "item/agentMessage/delta":
 		var p schema.AgentMessageDeltaNotification
@@ -856,6 +874,15 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 			c.logger.Warn("codexcli: codex deprecation notice",
 				"summary", ev.Summary, "details", ev.Details)
 			c.broadcastEvent(ev)
+		}
+	case schema.MethodThreadNameUpdated:
+		var p schema.ThreadNameUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &ThreadNameUpdatedEvent{ThreadID: p.ThreadID}
+			if p.ThreadName != nil {
+				ev.Name = *p.ThreadName
+			}
+			c.deliver(p.ThreadID, ev)
 		}
 	case schema.MethodServerRequestResolved:
 		var p schema.ServerRequestResolvedNotification

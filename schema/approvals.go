@@ -24,8 +24,8 @@ const (
 	// patch approval on the deprecated APIs.
 	MethodApplyPatchApproval = "applyPatchApproval"
 	// MethodToolRequestUserInput is the experimental server request method
-	// for the request_user_input tool. Not handled as an approval; the
-	// dispatcher exposes it via UnknownServerRequest.
+	// for the request_user_input tool. Not handled as an approval: it goes
+	// to the ServerRequestFunc; see ToolRequestUserInputParams.
 	MethodToolRequestUserInput = "item/tool/requestUserInput"
 	// MethodMcpServerElicitationRequest is the MCP elicitation request method.
 	MethodMcpServerElicitationRequest = "mcpServer/elicitation/request"
