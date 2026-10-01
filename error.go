@@ -31,7 +31,8 @@ var (
 	ErrNotSignedIn = errors.New("codexcli: no account signed in")
 	// ErrNoActiveTurn is returned by Thread.SendMessage when the thread
 	// has no turn to inject into: none was running, or the turn it saw
-	// ended before codex received the message. Start a turn instead.
+	// ended before codex received the message. Nothing was delivered.
+	// Start a turn instead.
 	ErrNoActiveTurn = errors.New("codexcli: no active turn")
 	// ErrTurnNotSteerable is returned when the active turn refuses new
 	// input: a review turn or a compaction turn. Codex refuses both
@@ -57,8 +58,10 @@ func classifyTurnInputError(err error) error {
 	if isNotSteerable(rerr) {
 		return fmt.Errorf("%w: %s", ErrTurnNotSteerable, rerr.Message)
 	}
-	msg := strings.ToLower(rerr.Message)
-	if strings.Contains(msg, "no active turn") || strings.Contains(msg, "expected active turn id") {
+	if rerr.Code != rpcCodeInvalidRequest {
+		return nil
+	}
+	if rerr.Message == "no active turn to steer" || strings.HasPrefix(rerr.Message, "expected active turn id ") {
 		return fmt.Errorf("%w: %s", ErrNoActiveTurn, rerr.Message)
 	}
 	return nil
@@ -70,14 +73,19 @@ func classifyTurnInputError(err error) error {
 func isNotSteerable(rerr *rpcError) bool {
 	var data struct {
 		CodexErrorInfo struct {
-			ActiveTurnNotSteerable json.RawMessage `json:"activeTurnNotSteerable"`
+			ActiveTurnNotSteerable *struct{} `json:"activeTurnNotSteerable"`
 		} `json:"codexErrorInfo"`
 	}
 	if len(rerr.Data) > 0 && json.Unmarshal(rerr.Data, &data) == nil && data.CodexErrorInfo.ActiveTurnNotSteerable != nil {
 		return true
 	}
-	msg := strings.ToLower(rerr.Message)
-	return strings.Contains(msg, "activeturnnotsteerable") || strings.Contains(msg, "cannot steer")
+	switch rerr.Code {
+	case rpcCodeInvalidRequest:
+		return strings.HasPrefix(rerr.Message, "cannot steer a ")
+	case rpcCodeInternalError:
+		return strings.Contains(rerr.Message, "ActiveTurnNotSteerable")
+	}
+	return false
 }
 
 // JSON-RPC error codes the app-server uses to reject a request outright.
@@ -87,6 +95,7 @@ func isNotSteerable(rerr *rpcError) bool {
 const (
 	rpcCodeInvalidRequest = -32600
 	rpcCodeMethodNotFound = -32601
+	rpcCodeInternalError  = -32603
 )
 
 // isMethodNotSupportedError reports whether an rpc error means the server

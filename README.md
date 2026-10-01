@@ -79,7 +79,7 @@ case errors.Is(err, codexcli.ErrTurnNotSteerable):
 }
 ```
 
-Do not use `StartTurn` for this. A `turn/start` while a turn is active does not start a turn: codex folds the input into the running turn and returns its id, and the new stream takes the thread's events away from the old one. During a review or compaction turn codex refuses `turn/start` too, and the stream fails with `ErrTurnNotSteerable`.
+Do not use `StartTurn` for this. A `turn/start` while a turn is active does not start a turn: codex folds the input into the running turn and returns its id, the new stream takes the thread's events, and the old stream ends without a `TurnCompletedEvent`. During a review or compaction turn codex refuses `turn/start` too, and the stream fails with `ErrTurnNotSteerable`.
 
 `steer_live_test.go` re-checks this against the codex on `PATH` (two small turns and one compaction):
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -208,46 +210,62 @@ func TestSendMessage_SteersRunningTurn(t *testing.T) {
 	<-served
 }
 
-// TestSendMessage_TurnEndedInFlight: the turn ends between ActiveTurnID
-// and codex receiving the steer. Both of codex's answers for that race
-// surface as ErrNoActiveTurn; any other rejection is passed through.
-func TestSendMessage_TurnEndedInFlight(t *testing.T) {
+func turnFrame(id, status string) map[string]any {
+	return map[string]any{"id": id, "status": status, "items": []any{}}
+}
+
+// activeThread connects to a fake app-server that starts turn_1 by itself
+// once the thread is registered, then hands the server to serve. It returns
+// when the thread sees turn_1 active.
+func activeThread(t *testing.T, serve func(fix *BidiFixtureExecutor)) *Thread {
+	t.Helper()
+	fix := NewBidiFixtureExecutor()
+	registered := make(chan struct{})
+	go func() {
+		serveThreadStart(t, fix, "thr_1")
+		// A turn/started for a thread NewThread has not returned yet
+		// would be dropped.
+		<-registered
+		_ = fix.SendNotification("turn/started", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "inProgress")})
+		serve(fix)
+		drainStrayFrames(fix)
+	}()
+	th := steerConn(t, fix)
+	close(registered)
+	deadline := time.Now().Add(3 * time.Second)
+	for th.ActiveTurnID() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("turn never became active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return th
+}
+
+// TestSendMessage_Rejections: codex's answers when the turn ended or moved
+// on in flight surface as ErrNoActiveTurn, a refusing turn as
+// ErrTurnNotSteerable, and anything else as neither, keeping codex's
+// message.
+func TestSendMessage_Rejections(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		code    int
 		message string
+		data    any
 		want    error
 	}{
-		{"turn completed", rpcCodeInvalidRequest, "no active turn to steer", ErrNoActiveTurn},
-		{"turn replaced", rpcCodeInvalidRequest, "expected active turn id `turn_1` but found `turn_2`", ErrNoActiveTurn},
-		{"review turn, no data", rpcCodeInvalidRequest, "cannot steer a review turn", ErrTurnNotSteerable},
-		{"other", -32603, "boom", nil},
+		{"turn completed", rpcCodeInvalidRequest, "no active turn to steer", nil, ErrNoActiveTurn},
+		{"turn replaced, not yet seen", rpcCodeInvalidRequest, "expected active turn id `turn_1` but found `turn_2`", nil, ErrNoActiveTurn},
+		{"review turn, no data", rpcCodeInvalidRequest, "cannot steer a review turn", nil, ErrTurnNotSteerable},
+		{"null codexErrorInfo variant", rpcCodeInvalidRequest, "bad input", map[string]any{"codexErrorInfo": map[string]any{"activeTurnNotSteerable": nil}}, nil},
+		{"same words, other code", rpcCodeInternalError, "no active turn to steer", nil, nil},
+		{"other", rpcCodeInternalError, "boom", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fix := NewBidiFixtureExecutor()
-			registered := make(chan struct{})
-			go func() {
-				serveThreadStart(t, fix, "thr_1")
-				// A turn/started for a thread NewThread has not returned
-				// yet would be dropped.
-				<-registered
-				_ = fix.SendNotification("turn/started", map[string]any{
-					"threadId": "thr_1",
-					"turn":     map[string]any{"id": "turn_1", "status": "inProgress", "items": []any{}},
-				})
+			th := activeThread(t, func(fix *BidiFixtureExecutor) {
 				id, _ := expectRequest(t, fix, schema.MethodTurnSteer)
-				_ = fix.SendErrorResponse(id, tc.code, tc.message)
-				drainStrayFrames(fix)
-			}()
-			th := steerConn(t, fix)
-			close(registered)
-			deadline := time.Now().Add(3 * time.Second)
-			for th.ActiveTurnID() == "" {
-				if time.Now().After(deadline) {
-					t.Fatal("turn never became active")
-				}
-				time.Sleep(time.Millisecond)
-			}
+				_ = fix.SendErrorResponseData(id, tc.code, tc.message, tc.data)
+			})
 			_, err := th.SendMessage(context.Background(), "hi")
 			if err == nil {
 				t.Fatal("SendMessage succeeded")
@@ -263,4 +281,119 @@ func TestSendMessage_TurnEndedInFlight(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSendMessage_RetriesOnceForNewTurn: a new turn starts while the steer
+// is in flight, so codex rejects the old id; its turn/started has landed by
+// the time the rejection is read, and the steer goes to the new turn.
+func TestSendMessage_RetriesOnceForNewTurn(t *testing.T) {
+	expected := make(chan string, 2)
+	th := activeThread(t, func(fix *BidiFixtureExecutor) {
+		id, raw := expectRequest(t, fix, schema.MethodTurnSteer)
+		var p schema.TurnSteerParams
+		_ = json.Unmarshal(raw, &p)
+		expected <- p.ExpectedTurnID
+		_ = fix.SendNotification("turn/completed", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "completed")})
+		_ = fix.SendNotification("turn/started", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_2", "inProgress")})
+		_ = fix.SendErrorResponse(id, rpcCodeInvalidRequest, "expected active turn id `turn_1` but found `turn_2`")
+		id, raw = expectRequest(t, fix, schema.MethodTurnSteer)
+		_ = json.Unmarshal(raw, &p)
+		expected <- p.ExpectedTurnID
+		_ = fix.SendResponse(id, schema.TurnSteerResponse{TurnID: "turn_2"})
+	})
+	got, err := th.SendMessage(context.Background(), "hi")
+	if err != nil || got != "turn_2" {
+		t.Fatalf("SendMessage = %q, %v; want turn_2", got, err)
+	}
+	if a, b := <-expected, <-expected; a != "turn_1" || b != "turn_2" {
+		t.Errorf("expectedTurnId sent %s then %s, want turn_1 then turn_2", a, b)
+	}
+}
+
+// TestStartTurn_CompletedBeforeResponse: the reader dispatches a fast
+// turn's turn/started and turn/completed before StartTurn's requester reads
+// the turn/start response. The turn stays over: SendMessage fails locally
+// with ErrNoActiveTurn instead of steering a finished turn.
+func TestStartTurn_CompletedBeforeResponse(t *testing.T) {
+	fix := NewBidiFixtureExecutor()
+	go func() {
+		serveThreadStart(t, fix, "thr_1")
+		id, _ := expectRequest(t, fix, "turn/start")
+		_ = fix.SendNotification("turn/started", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "inProgress")})
+		_ = fix.SendNotification("turn/completed", map[string]any{"threadId": "thr_1", "turn": turnFrame("turn_1", "completed")})
+		_ = fix.SendResponse(id, map[string]any{"turn": turnFrame("turn_1", "inProgress")})
+		// The next request must be the interrupt, not a turn/steer.
+		id, _ = expectRequest(t, fix, "turn/interrupt")
+		_ = fix.SendResponse(id, map[string]any{})
+		drainStrayFrames(fix)
+	}()
+	th := steerConn(t, fix)
+	stream, err := th.StartTurn(context.Background(), "quick")
+	if err != nil {
+		t.Fatalf("StartTurn: %v", err)
+	}
+	// The stream ends on turn/completed, which the reader dispatched before
+	// the response; the requester's bookkeeping runs before the loop.
+	if _, err := drainTurnObserving(stream, 3*time.Second, nil); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if id := th.ActiveTurnID(); id != "" {
+		t.Fatalf("ActiveTurnID = %q after the turn completed", id)
+	}
+	if _, err := th.SendMessage(context.Background(), "late"); !errors.Is(err, ErrNoActiveTurn) {
+		t.Errorf("SendMessage = %v, want ErrNoActiveTurn", err)
+	}
+	if err := th.Interrupt(context.Background()); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+}
+
+// TestSubscribe_ReplacedStreamEnds: a second subscriber for a thread closes
+// the first, and the first ending afterwards leaves the second in place.
+func TestSubscribe_ReplacedStreamEnds(t *testing.T) {
+	c := &Conn{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	a := c.subscribe("thr")
+	b := c.subscribe("thr")
+	if _, ok := <-a; ok {
+		t.Fatal("replaced subscriber still open")
+	}
+	c.unsubscribe("thr", a)
+	c.deliver("thr", &TurnStartedEvent{ThreadID: "thr"})
+	select {
+	case ev, ok := <-b:
+		if !ok || ev == nil {
+			t.Fatal("successor closed by the replaced subscriber's unsubscribe")
+		}
+	default:
+		t.Fatal("event not delivered to the successor")
+	}
+	c.unsubscribe("thr", b)
+	if _, ok := <-b; ok {
+		t.Fatal("unsubscribe left the subscriber open")
+	}
+}
+
+// TestDeliver_RacesUnsubscribe: the reader delivers while Streams come and
+// go. Run under -race: a send outside subsMu raced unsubscribe's close.
+func TestDeliver_RacesUnsubscribe(t *testing.T) {
+	c := &Conn{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				c.deliver("thr", &TurnStartedEvent{ThreadID: "thr"})
+			}
+		}
+	}()
+	for range 2000 {
+		sub := c.subscribe("thr")
+		c.unsubscribe("thr", sub)
+	}
+	close(stop)
+	<-done
 }

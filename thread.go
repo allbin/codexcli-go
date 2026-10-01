@@ -18,6 +18,9 @@ type Thread struct {
 
 	mu         sync.Mutex
 	activeTurn string
+	// lastCompleted is the most recent turn/completed id, so a turn/start
+	// response read after that turn already finished does not revive it.
+	lastCompleted string
 }
 
 // ActiveTurnID returns the most recently observed in-flight turn id, or
@@ -32,6 +35,24 @@ func (t *Thread) ActiveTurnID() string {
 func (t *Thread) setActiveTurn(id string) {
 	t.mu.Lock()
 	t.activeTurn = id
+	t.mu.Unlock()
+}
+
+// startedTurn records the turn a turn/start response names. The reader
+// can dispatch that turn's turn/completed before the requester resumes;
+// the turn is then over and stays cleared.
+func (t *Thread) startedTurn(id string) {
+	t.mu.Lock()
+	if id != t.lastCompleted {
+		t.activeTurn = id
+	}
+	t.mu.Unlock()
+}
+
+func (t *Thread) completedTurn(id string) {
+	t.mu.Lock()
+	t.activeTurn = ""
+	t.lastCompleted = id
 	t.mu.Unlock()
 }
 
@@ -62,8 +83,8 @@ func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
 // turn/start while a turn is running does not start a new one, it folds
 // the input into the running turn and returns that turn's id (observed
 // live on codex 0.148 and 0.159.3). The new Stream takes over the thread's
-// events, and the earlier Stream stops receiving them and never ends on
-// its own. To add input to a
+// events, and the earlier Stream ends without a TurnCompletedEvent (Wait
+// returns ErrNoTurn). To add input to a
 // running turn, use SendMessage, which leaves the existing Stream in
 // place. While a review or compaction turn runs, codex refuses turn/start
 // and StartTurn's stream fails with ErrTurnNotSteerable.
@@ -88,7 +109,7 @@ func (t *Thread) StartTurnInput(ctx context.Context, input []schema.UserInput, o
 	go func() {
 		defer close(done)
 		defer close(events)
-		defer t.conn.unsubscribe(t.ID)
+		defer t.conn.unsubscribe(t.ID, sub)
 
 		if _, err := t.startTurnInput(streamCtx, input, opts...); err != nil {
 			events <- &ErrorEvent{Err: fmt.Errorf("turn/start: %w", err), Fatal: true}
@@ -134,7 +155,7 @@ func (t *Thread) startTurnInput(ctx context.Context, input []schema.UserInput, o
 		}
 		return nil, t.conn.promoteRPCError("turn/start", err)
 	}
-	t.setActiveTurn(resp.Turn.ID)
+	t.startedTurn(resp.Turn.ID)
 	return &resp, nil
 }
 
@@ -149,9 +170,11 @@ func (t *Thread) startTurnInput(ctx context.Context, input []schema.UserInput, o
 // The turn is the one ActiveTurnID reports, sent as turn/steer's
 // expectedTurnId precondition. Errors:
 //
-//   - ErrNoActiveTurn: no turn is running, or the turn ended (or another
-//     replaced it) before codex received the message. Nothing was
-//     delivered; start a turn with the message instead.
+//   - ErrNoActiveTurn: no turn is running, or the turn ended before codex
+//     received the message. Nothing was delivered; start a turn with the
+//     message instead. If codex names a different active turn and this
+//     Thread has seen it start by then, SendMessage retries once against
+//     it; if it has not, that is ErrNoActiveTurn too.
 //   - ErrTurnNotSteerable: the running turn is a review or compaction
 //     turn, which codex refuses to steer. Nothing was delivered; buffer
 //     the message until the turn completes.
@@ -165,19 +188,29 @@ func (t *Thread) SendMessageWithInput(ctx context.Context, input []schema.UserIn
 	if err := t.conn.checkExited(); err != nil {
 		return "", err
 	}
-	turnID := t.ActiveTurnID()
-	if turnID == "" {
-		return "", fmt.Errorf("turn/steer: %w", ErrNoActiveTurn)
-	}
-	params := schema.TurnSteerParams{ThreadID: t.ID, Input: input, ExpectedTurnID: turnID}
-	var resp schema.TurnSteerResponse
-	if err := t.conn.rpc.Request(ctx, schema.MethodTurnSteer, params, &resp); err != nil {
-		if cerr := classifyTurnInputError(err); cerr != nil {
+	for attempt := 0; ; attempt++ {
+		turnID := t.ActiveTurnID()
+		if turnID == "" {
+			return "", fmt.Errorf("turn/steer: %w", ErrNoActiveTurn)
+		}
+		params := schema.TurnSteerParams{ThreadID: t.ID, Input: input, ExpectedTurnID: turnID}
+		var resp schema.TurnSteerResponse
+		err := t.conn.rpc.Request(ctx, schema.MethodTurnSteer, params, &resp)
+		if err == nil {
+			return resp.TurnID, nil
+		}
+		cerr := classifyTurnInputError(err)
+		// A mismatch while ActiveTurnID has since moved on means the
+		// turn/started for the new turn landed during the request: steer
+		// that one. Once, so a thread nobody keeps current cannot loop.
+		if attempt == 0 && errors.Is(cerr, ErrNoActiveTurn) && t.ActiveTurnID() != turnID {
+			continue
+		}
+		if cerr != nil {
 			return "", fmt.Errorf("turn/steer: %w", cerr)
 		}
 		return "", t.conn.promoteRPCError("turn/steer", err)
 	}
-	return resp.TurnID, nil
 }
 
 // callOpts returns a slice of Options that re-derive the current

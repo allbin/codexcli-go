@@ -156,7 +156,7 @@ func (c *Client) Run(ctx context.Context, prompt string, opts ...Option) (*Strea
 	go func() {
 		defer close(done)
 		defer close(events)
-		defer conn.unsubscribe(thread.ID)
+		defer conn.unsubscribe(thread.ID, sub)
 
 		if _, err := thread.startTurn(streamCtx, prompt, opts...); err != nil {
 			events <- &ErrorEvent{Err: fmt.Errorf("turn/start: %w", err), Fatal: true}
@@ -498,30 +498,41 @@ func (c *Conn) lookupThread(id string) *Thread {
 
 // --- subscription bookkeeping ---
 
+// subscribe makes a new channel the thread's only subscriber. A channel it
+// replaces is closed, so the Stream reading it ends rather than waiting
+// for events that now go elsewhere.
 func (c *Conn) subscribe(threadID string) <-chan Event {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
 	if c.subs == nil {
 		c.subs = map[string]chan Event{}
 	}
+	if old, ok := c.subs[threadID]; ok {
+		close(old)
+	}
 	ch := make(chan Event, 64)
 	c.subs[threadID] = ch
 	return ch
 }
 
-func (c *Conn) unsubscribe(threadID string) {
+// unsubscribe closes sub if it is still the thread's subscriber. A sub
+// that a later subscribe replaced is already closed and left alone, so a
+// replaced Stream ending does not cut off its successor.
+func (c *Conn) unsubscribe(threadID string, sub <-chan Event) {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
-	if ch, ok := c.subs[threadID]; ok {
+	if ch, ok := c.subs[threadID]; ok && (<-chan Event)(ch) == sub {
 		close(ch)
 		delete(c.subs, threadID)
 	}
 }
 
+// deliver holds subsMu across the send so unsubscribe cannot close ch
+// mid-send; the send never blocks, so holding the lock is cheap.
 func (c *Conn) deliver(threadID string, ev Event) {
 	c.subsMu.Lock()
+	defer c.subsMu.Unlock()
 	ch := c.subs[threadID]
-	c.subsMu.Unlock()
 	if ch == nil {
 		return
 	}
@@ -571,7 +582,7 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		var p schema.TurnCompletedNotification
 		if err := json.Unmarshal(params, &p); err == nil {
 			if t := c.lookupThread(p.ThreadId); t != nil {
-				t.setActiveTurn("")
+				t.completedTurn(p.Turn.ID)
 			}
 			c.deliver(p.ThreadId, &TurnCompletedEvent{ThreadID: p.ThreadId, Turn: p.Turn})
 		}
