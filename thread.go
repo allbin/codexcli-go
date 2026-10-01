@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -57,8 +58,15 @@ func (t *Thread) Response() schema.ThreadStartResponse { return t.response }
 // stream of typed events scoped to this turn. The stream ends with
 // TurnCompletedEvent (or ErrorEvent on transport/protocol failure).
 //
-// Multiple concurrent turns on the same thread are not supported by
-// codex app-server — call StartTurn sequentially.
+// Call it only when no turn is active. Codex runs one turn per thread: a
+// turn/start while a turn is running does not start a new one, it folds
+// the input into the running turn and returns that turn's id (observed
+// live on codex 0.148 and 0.159.3). The new Stream takes over the thread's
+// events, and the earlier Stream stops receiving them and never ends on
+// its own. To add input to a
+// running turn, use SendMessage, which leaves the existing Stream in
+// place. While a review or compaction turn runs, codex refuses turn/start
+// and StartTurn's stream fails with ErrTurnNotSteerable.
 //
 // opts layer over the connection's options, and codex keeps some turn
 // settings for later turns. WithEffort documents how the two interact.
@@ -121,10 +129,55 @@ func (t *Thread) startTurnInput(ctx context.Context, input []schema.UserInput, o
 	params := resolved.buildTurnStartParams(t.ID, input)
 	var resp schema.TurnStartResponse
 	if err := t.conn.rpc.Request(ctx, "turn/start", params, &resp); err != nil {
+		if cerr := classifyTurnInputError(err); errors.Is(cerr, ErrTurnNotSteerable) {
+			return nil, fmt.Errorf("turn/start: %w", cerr)
+		}
 		return nil, t.conn.promoteRPCError("turn/start", err)
 	}
 	t.setActiveTurn(resp.Turn.ID)
 	return &resp, nil
+}
+
+// SendMessage injects a user message into the turn already running on t,
+// without waiting for it to finish. Unlike StartTurn it neither starts nor
+// tracks a turn: codex adds the message to the running turn as a
+// userMessage item, the model sees it at its next step, and the events
+// keep arriving on the Stream that turn's StartTurn returned. It returns
+// the id of the turn the message joined. Mirrors
+// claudecli-go.Session.SendMessage.
+//
+// The turn is the one ActiveTurnID reports, sent as turn/steer's
+// expectedTurnId precondition. Errors:
+//
+//   - ErrNoActiveTurn: no turn is running, or the turn ended (or another
+//     replaced it) before codex received the message. Nothing was
+//     delivered; start a turn with the message instead.
+//   - ErrTurnNotSteerable: the running turn is a review or compaction
+//     turn, which codex refuses to steer. Nothing was delivered; buffer
+//     the message until the turn completes.
+func (t *Thread) SendMessage(ctx context.Context, prompt string) (string, error) {
+	return t.SendMessageWithInput(ctx, []schema.UserInput{schema.TextInput(prompt)})
+}
+
+// SendMessageWithInput is SendMessage for typed input blocks: images,
+// local images, skills and mentions.
+func (t *Thread) SendMessageWithInput(ctx context.Context, input []schema.UserInput) (string, error) {
+	if err := t.conn.checkExited(); err != nil {
+		return "", err
+	}
+	turnID := t.ActiveTurnID()
+	if turnID == "" {
+		return "", fmt.Errorf("turn/steer: %w", ErrNoActiveTurn)
+	}
+	params := schema.TurnSteerParams{ThreadID: t.ID, Input: input, ExpectedTurnID: turnID}
+	var resp schema.TurnSteerResponse
+	if err := t.conn.rpc.Request(ctx, schema.MethodTurnSteer, params, &resp); err != nil {
+		if cerr := classifyTurnInputError(err); cerr != nil {
+			return "", fmt.Errorf("turn/steer: %w", cerr)
+		}
+		return "", t.conn.promoteRPCError("turn/steer", err)
+	}
+	return resp.TurnID, nil
 }
 
 // callOpts returns a slice of Options that re-derive the current

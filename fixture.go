@@ -158,6 +158,15 @@ func (e *BidiFixtureExecutor) SendErrorResponse(id json.RawMessage, code int, me
 	})
 }
 
+// SendErrorResponseData is SendErrorResponse with an error data payload,
+// for rejections codex classifies through data.codexErrorInfo.
+func (e *BidiFixtureExecutor) SendErrorResponseData(id json.RawMessage, code int, message string, data any) error {
+	return writeRPCFrame(e.ServerWriter, rpcFrame{
+		ID:    id,
+		Error: &rpcFrameError{Code: code, Message: message, Data: mustRawJSON(data)},
+	})
+}
+
 // SendRequest writes a server-initiated request (e.g. an approval) and
 // returns the id used so the test can later match the response.
 func (e *BidiFixtureExecutor) SendRequest(id json.RawMessage, method string, params any) error {

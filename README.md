@@ -7,7 +7,7 @@ Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC
 ## Install
 
 ```
-go get github.com/allbin/codexcli-go@v0.3.2
+go get github.com/allbin/codexcli-go@v0.7.0
 ```
 
 Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md). Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.
@@ -59,6 +59,32 @@ if errors.Is(err, codexcli.ErrThreadNotFound) {
 }
 
 stream, _ := thread.StartTurn(ctx, "Continue where we left off.")
+```
+
+## Mid-turn messages
+
+`Thread.SendMessage` adds a user message to the turn already running, over `turn/steer`. The message lands as a `userMessage` item in that turn, the model sees it at its next step, and events keep arriving on the stream `StartTurn` returned. It returns the turn's id; it never starts a turn.
+
+```go
+stream, _ := thread.StartTurn(ctx, "Refactor the parser.")
+// ... later, while the turn is still running:
+_, err := thread.SendMessage(ctx, "Also keep the public API unchanged.")
+switch {
+case errors.Is(err, codexcli.ErrNoActiveTurn):
+    // Nothing running, or the turn ended before codex got the message.
+    stream, err = thread.StartTurn(ctx, "Also keep the public API unchanged.")
+case errors.Is(err, codexcli.ErrTurnNotSteerable):
+    // A review or compaction turn: codex refuses new input until it ends.
+    // Buffer the message and send it after TurnCompletedEvent.
+}
+```
+
+Do not use `StartTurn` for this. A `turn/start` while a turn is active does not start a turn: codex folds the input into the running turn and returns its id, and the new stream takes the thread's events away from the old one. During a review or compaction turn codex refuses `turn/start` too, and the stream fails with `ErrTurnNotSteerable`.
+
+`steer_live_test.go` re-checks this against the codex on `PATH` (two small turns and one compaction):
+
+```
+go test -tags integration -run TestLive_SendMessage -count=1 -v .
 ```
 
 ## Reasoning effort

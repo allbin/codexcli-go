@@ -791,6 +791,10 @@ first `thread/status/changed` reliably precedes the `subAgentActivity` that name
 
 ### 2. `SendMessage` — mid-turn injection over `turn/steer`
 
+**Shipped in v0.7.0** as `Thread.SendMessage` / `SendMessageWithInput`, with
+`ErrNoActiveTurn` and `ErrTurnNotSteerable`. Error shapes re-observed on codex 0.159.3 are
+listed on `classifyTurnInputError` in `error.go`.
+
 Removes Agentique's buffer-and-replay emulation entirely. Name it after `claudecli-go`'s
 `Session.SendMessage`, whose doc already describes codex's behaviour exactly: *"Unlike Query,
 it can be called while another query is in progress… The CLI folds injected messages into the

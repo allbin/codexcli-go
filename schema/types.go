@@ -448,6 +448,26 @@ type TurnStartResponse struct {
 	Turn Turn `json:"turn"`
 }
 
+// MethodTurnSteer is the `turn/steer` request: add user input to the turn
+// already running on a thread.
+const MethodTurnSteer = "turn/steer"
+
+// TurnSteerParams is the `turn/steer` request payload. ExpectedTurnID is a
+// required precondition: codex rejects the request unless it names the
+// thread's active turn.
+type TurnSteerParams struct {
+	ThreadID            string      `json:"threadId"`
+	Input               []UserInput `json:"input"`
+	ExpectedTurnID      string      `json:"expectedTurnId"`
+	ClientUserMessageID *string     `json:"clientUserMessageId,omitempty"`
+}
+
+// TurnSteerResponse is the reply to `turn/steer`. TurnID is the id of the
+// turn the input joined, which is the active turn, not a new one.
+type TurnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
 // TurnStatus values match the server enum.
 type TurnStatus string
 

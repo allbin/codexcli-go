@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,7 +29,56 @@ var (
 	// ErrNotSignedIn is returned by Conn.Account when the app-server
 	// answers `account/read` with no account, i.e. nobody is logged in.
 	ErrNotSignedIn = errors.New("codexcli: no account signed in")
+	// ErrNoActiveTurn is returned by Thread.SendMessage when the thread
+	// has no turn to inject into: none was running, or the turn it saw
+	// ended before codex received the message. Start a turn instead.
+	ErrNoActiveTurn = errors.New("codexcli: no active turn")
+	// ErrTurnNotSteerable is returned when the active turn refuses new
+	// input: a review turn or a compaction turn. Codex refuses both
+	// turn/steer and turn/start until that turn ends, so buffer the
+	// message and send it once the turn completes.
+	ErrTurnNotSteerable = errors.New("codexcli: active turn not steerable")
 )
+
+// classifyTurnInputError maps codex's rejections of turn/steer and
+// turn/start onto the turn sentinels, or returns nil when err is neither.
+// Messages observed live against codex 0.159.3:
+//
+//	turn/steer, idle thread:     -32600 "no active turn to steer"
+//	turn/steer, other turn id:   -32600 "expected active turn id `a` but found `b`"
+//	turn/steer, compaction turn: -32600 "cannot steer a compact turn",
+//	                             data.codexErrorInfo.activeTurnNotSteerable.turnKind = "compact"
+//	turn/start, compaction turn: -32603 "failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact }"
+func classifyTurnInputError(err error) error {
+	var rerr *rpcError
+	if !errors.As(err, &rerr) {
+		return nil
+	}
+	if isNotSteerable(rerr) {
+		return fmt.Errorf("%w: %s", ErrTurnNotSteerable, rerr.Message)
+	}
+	msg := strings.ToLower(rerr.Message)
+	if strings.Contains(msg, "no active turn") || strings.Contains(msg, "expected active turn id") {
+		return fmt.Errorf("%w: %s", ErrNoActiveTurn, rerr.Message)
+	}
+	return nil
+}
+
+// isNotSteerable reports an activeTurnNotSteerable rejection, from
+// data.codexErrorInfo when present and the message otherwise. turn/start
+// carries no data, only the Rust variant name in its message.
+func isNotSteerable(rerr *rpcError) bool {
+	var data struct {
+		CodexErrorInfo struct {
+			ActiveTurnNotSteerable json.RawMessage `json:"activeTurnNotSteerable"`
+		} `json:"codexErrorInfo"`
+	}
+	if len(rerr.Data) > 0 && json.Unmarshal(rerr.Data, &data) == nil && data.CodexErrorInfo.ActiveTurnNotSteerable != nil {
+		return true
+	}
+	msg := strings.ToLower(rerr.Message)
+	return strings.Contains(msg, "activeturnnotsteerable") || strings.Contains(msg, "cannot steer")
+}
 
 // JSON-RPC error codes the app-server uses to reject a request outright.
 // codex rejects an unrecognised method while deserializing the
