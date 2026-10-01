@@ -11,9 +11,54 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.8.1`).
+or pin a specific version (e.g. `@v0.9.0`).
 
 ## [Unreleased]
+
+## [0.9.0] - 2026-10-01
+
+Subagents become visible and stop with their parent, threads can be
+renamed, and request_user_input is typed. Codex behaviour checked live on
+0.159.3, three runs each.
+
+### Added
+
+- **Subagent events on the parent's Stream.** Codex subagents are sibling
+  threads on the connection, and every frame they sent was dropped. Child
+  events now arrive on the root thread's Stream as `ChildThreadEvent`
+  (`Child` identifies the child: thread id, parent, `AgentPath`,
+  spawning `ToolCallID`, `SpawnTurnID`, `ActiveTurnID`; `Event` is the
+  child's event). Frames that arrive before the parent's
+  `subAgentActivity` names the child are held and replayed after it.
+  Grandchildren route to the same root. A child's `TurnCompletedEvent`
+  does not end the Stream. Events from a child after its root's Stream
+  has ended are dropped.
+- **`Thread.Children()`** and **`Conn.ChildThread(id)`** report the
+  subagent tree this connection has seen.
+- **`Thread.SetName(ctx, name)`** over `thread/name/set`, with
+  `ThreadNameUpdatedEvent` for `thread/name/updated`. `ErrThreadEphemeral`
+  for an ephemeral thread, which codex keeps no metadata for;
+  `ErrThreadNotFound` for an unknown one.
+- **request_user_input types.** `ServerRequest.UserInput()` decodes the
+  request into `schema.ToolRequestUserInputParams` (questions with `ID`,
+  `Header`, `Question`, `IsOther`, `IsSecret`, `Options`; `IsBlocking`).
+  `schema.UserInputAnswers` builds the reply keyed by question id;
+  `schema.UserInputDismissed` (`{"answers":{}}`) dismisses. A reply keyed
+  any other way, such as `{"answers":{"text":"…"}}`, reaches the model as
+  no answer, the same as a dismissal.
+- `schema.ThreadItem.SubAgentActivity()` projection and the
+  `SubAgentActivity*` kinds (codex 0.159.3 adds `completed`).
+
+### Changed
+
+- **`Thread.Interrupt` stops subagents.** Codex leaves a subagent running
+  when its parent's turn is interrupted (observed twice on 0.159.3), so
+  Interrupt now interrupts every descendant's running turn first,
+  concurrently and each bounded by 3s, then the thread's own.
+- **`Thread.Interrupt` with no active turn sends nothing** and returns
+  nil. Codex 0.159.3 rejects `turn/interrupt` without a turn id
+  ("missing field `turnId`"), so it had started returning an error,
+  contrary to its doc.
 
 ## [0.8.1] - 2026-10-01
 
