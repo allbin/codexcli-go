@@ -471,6 +471,44 @@ func (c *Conn) ResumeThread(ctx context.Context, threadID string, opts ...Option
 	return t, nil
 }
 
+// DeleteThread deletes a persisted thread from CODEX_HOME over
+// thread/delete. A thread codex has no record of, including one already
+// deleted, returns ErrThreadNotFound. Codex's schema announces a delete
+// with thread/deleted, which arrives as ThreadDeletedEvent on an open
+// Stream.
+//
+// Observed live on codex 0.160.0, three runs (delete_live_test.go):
+//   - Removed: the rollout file sessions/YYYY/MM/DD/rollout-*-<id>.jsonl,
+//     the thread's thread_items, thread_turns and
+//     thread_history_projection_state rows in thread_history_1.sqlite, and
+//     its threads row in state_5.sqlite. No other table or file in
+//     CODEX_HOME mentions the id afterwards.
+//   - Kept: rows in logs_2.sqlite's logs table, codex's own tracing log,
+//     which carry the id in span metadata. A shell command's output, kept
+//     in thread_items before the delete, was in no table afterwards.
+//   - Subagents: deleting a thread deletes the subagent threads it spawned,
+//     rollouts and rows alike, whether or not this connection has the
+//     threads loaded. Deleting a child afterwards returns
+//     ErrThreadNotFound, so a caller that deletes each of Children() as
+//     well can treat that as done. Take Children() before deleting: the
+//     deleted thread's subagents leave the connection's tree with it.
+//   - A thread loaded on this connection is shut down first. Deleting a
+//     thread with a turn running was not tested.
+func (c *Conn) DeleteThread(ctx context.Context, threadID string) error {
+	if err := c.checkExited(); err != nil {
+		return err
+	}
+	params := schema.ThreadDeleteParams{ThreadID: threadID}
+	if err := c.rpc.Request(ctx, schema.MethodThreadDelete, params, nil); err != nil {
+		if isThreadNotFoundError(err) {
+			return fmt.Errorf("%s %s: %w", schema.MethodThreadDelete, threadID, ErrThreadNotFound)
+		}
+		return c.promoteRPCError(schema.MethodThreadDelete, err)
+	}
+	c.forgetDeleted(threadID)
+	return nil
+}
+
 // isThreadNotFoundError checks if an RPC error indicates the thread
 // couldn't be found, matching the known server error message patterns.
 func isThreadNotFoundError(err error) bool {
@@ -883,6 +921,11 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 				ev.Name = *p.ThreadName
 			}
 			c.deliver(p.ThreadID, ev)
+		}
+	case schema.MethodThreadDeleted:
+		var p schema.ThreadDeletedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.deliver(p.ThreadID, &ThreadDeletedEvent{ThreadID: p.ThreadID})
 		}
 	case schema.MethodServerRequestResolved:
 		var p schema.ServerRequestResolvedNotification

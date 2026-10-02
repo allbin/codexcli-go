@@ -254,6 +254,23 @@ func (c *Conn) detachThread(threadID string) {
 	r.forget(threadID)
 }
 
+// forgetDeleted drops a deleted thread, and the subagents codex deleted
+// with it, from the connection's bookkeeping.
+func (c *Conn) forgetDeleted(threadID string) {
+	gone := c.descendants(threadID)
+	c.threadsMu.Lock()
+	delete(c.threads, threadID)
+	c.threadsMu.Unlock()
+	r := &c.childReg
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.init()
+	r.forget(threadID)
+	for _, child := range gone {
+		r.forget(child.ThreadID)
+	}
+}
+
 // ChildThread reports a subagent thread this connection has seen spawned.
 func (c *Conn) ChildThread(threadID string) (ChildThread, bool) {
 	r := &c.childReg

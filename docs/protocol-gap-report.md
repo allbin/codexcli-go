@@ -528,14 +528,21 @@ partially supported at the request level.
 
 **Supported**: `initialize`, `model/list`, `skills/list`, `skills/config/write`,
 `skills/extraRoots/set`, `mcpServerStatus/list`, `thread/start`, `thread/resume`,
-`turn/start`, `turn/interrupt`, `account/read`, `account/rateLimits/read`.
+`turn/start`, `turn/interrupt`, `account/read`, `account/rateLimits/read`. Added
+since, without recounting the totals above: `thread/name/set`, `turn/steer`,
+`thread/delete`.
+
+`thread/delete` (`Conn.DeleteThread`) on codex 0.160.0 removes the rollout and every
+`thread_history_1.sqlite` / `state_5.sqlite` row for the thread, and deletes the subagent
+threads it spawned too; only `logs_2.sqlite`'s tracing log keeps the id `[live]`, three
+runs of `delete_live_test.go`. Its doc comment has the detail.
 
 `skills/extraRoots/set` (`Conn.SetSkillsExtraRoots`) replaces the runtime skill roots
 for the whole connection and is followed by `skills/changed`; read from codex source
 `ext/skills/src/host_service.rs:154` and `app-server/src/request_processors/catalog_processor.rs:595`
 at commit e72da2b `[unverified]` live.
 
-**Missing, stable (86)**:
+**Missing, stable (83)**:
 
 `account/login/cancel`, `account/login/start`, `account/logout`,
 `account/rateLimitResetCredit/consume`,
@@ -555,12 +562,12 @@ at commit e72da2b `[unverified]` live.
 `plugin/share/delete`, `plugin/share/list`, `plugin/share/save`,
 `plugin/share/updateTargets`, `plugin/skill/read`, `plugin/uninstall`, `review/start`,
 `thread/approveGuardianDeniedAction`, `thread/archive`,
-`thread/compact/start`, `thread/delete`, `thread/fork`, `thread/goal/clear`,
+`thread/compact/start`, `thread/fork`, `thread/goal/clear`,
 `thread/goal/get`, `thread/goal/set`, `thread/inject_items`, `thread/list`,
-`thread/loaded/list`, `thread/metadata/update`, `thread/name/set`, `thread/read`,
+`thread/loaded/list`, `thread/metadata/update`, `thread/read`,
 `thread/rollback` *(deprecated)*, `thread/section/move`, `thread/shellCommand`,
 `thread/unarchive`, `thread/unsubscribe`, `threadSection/create`, `threadSection/delete`,
-`threadSection/list`, `threadSection/update`, `turn/steer`, `windowsSandbox/readiness`,
+`threadSection/list`, `threadSection/update`, `windowsSandbox/readiness`,
 `windowsSandbox/setupStart`.
 
 Plus four legacy v1 methods with no namespace prefix, all stable: `fuzzyFileSearch`,
@@ -615,7 +622,7 @@ relevance to a session orchestrator:
 | `item/commandExecution/terminalInteraction` | PTY interaction |
 | `serverRequest/resolved` | A server request was answered elsewhere — cancels a pending prompt |
 | `hook/started`, `hook/completed` | `hooks` is default-on |
-| `thread/archived`, `thread/unarchived`, `thread/deleted` | Session list sync |
+| `thread/archived`, `thread/unarchived` | Session list sync (`thread/deleted` is now `ThreadDeletedEvent`) |
 | `mcpServer/oauthLogin/completed` | MCP auth flow |
 | `account/updated`, `account/login/completed` | Auth state |
 | `fs/changed` | Only if `fs/watch` is used |
@@ -972,6 +979,8 @@ func (c *Conn) SetThreadName(ctx context.Context, threadID, name string) error
 func (c *Conn) ArchiveThread(ctx context.Context, threadID string) error
 func (c *Conn) DeleteThread(ctx context.Context, threadID string) error
 ```
+
+`DeleteThread` shipped, with `ThreadDeletedEvent` for `thread/deleted`.
 
 `SetThreadName` mirrors `claudecli-go.Session.RenameSession`. Add the `thread/name/updated`
 notification too — codex renames threads on its own, so a cached title goes stale.

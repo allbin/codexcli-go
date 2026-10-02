@@ -41,6 +41,17 @@ func (e *ThreadNameUpdatedEvent) String() string {
 	return fmt.Sprintf("ThreadNameUpdatedEvent{Thread: %s, Name: %q}", e.ThreadID, e.Name)
 }
 
+// ThreadDeletedEvent corresponds to `thread/deleted`: the thread was
+// deleted, by Conn.DeleteThread or another client of the same codex.
+type ThreadDeletedEvent struct {
+	ThreadID string
+}
+
+func (*ThreadDeletedEvent) event() {}
+func (e *ThreadDeletedEvent) String() string {
+	return fmt.Sprintf("ThreadDeletedEvent{Thread: %s}", e.ThreadID)
+}
+
 // TurnPlanUpdatedEvent corresponds to `turn/plan/updated` — the agent's
 // todo plan, resent in full on every change. Render Plan as-is; do not
 // try to diff against the previous event.

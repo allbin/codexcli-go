@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits and account, aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename/delete, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits and account, aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3, and `DeleteThread` (v0.10.0) against 0.160.0 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
 
 ## Install
 
@@ -119,6 +119,15 @@ a new thread before its first turn is announced when that turn starts.
 Ephemeral
 threads keep no metadata: codex refuses and `SetName` returns
 `ErrThreadEphemeral`.
+
+## Deleting threads
+
+A persisted thread stays in `CODEX_HOME` until deleted.
+`Conn.DeleteThread(ctx, id)` (`thread/delete`) removes it. On codex
+0.160.0 that is the rollout file and every row in `thread_history_1.sqlite`
+and `state_5.sqlite`; only `logs_2.sqlite`'s tracing log still mentions the
+id. Subagent threads it spawned go with it, so deleting one afterwards
+returns `ErrThreadNotFound`, as does any unknown thread.
 
 ## Questions to the user (`request_user_input`)
 

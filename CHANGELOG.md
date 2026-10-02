@@ -15,6 +15,21 @@ or pin a specific version (e.g. `@v0.9.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **`Conn.DeleteThread(ctx, threadID)`** over `thread/delete`, with
+  `ThreadDeletedEvent` for `thread/deleted`. On codex 0.160.0 it removes
+  the thread's rollout file and its rows in `thread_history_1.sqlite`
+  (`thread_items`, `thread_turns`, `thread_history_projection_state`) and
+  `state_5.sqlite` (`threads`); only `logs_2.sqlite`'s tracing log still
+  mentions the id, and a shell command's output was in no table
+  afterwards. Deleting a thread also deletes the subagent threads it
+  spawned, from the connection that ran them or from a fresh one.
+  `ErrThreadNotFound` for an unknown or already deleted thread, including
+  a subagent deleted with its parent. The deleted thread and its
+  subagents leave the connection's bookkeeping (`Thread.Children`,
+  `Conn.ChildThread`), so take `Children()` first.
+
 ## [0.9.0] - 2026-10-01
 
 Subagents become visible and stop with their parent, threads can be

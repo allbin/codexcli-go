@@ -279,6 +279,64 @@ func TestDispatch_ThreadNameUpdated(t *testing.T) {
 	}
 }
 
+// TestDeleteThread: thread/delete carries the thread id and drops the
+// thread and its subagents, which codex deletes with it, from the
+// connection; an unknown thread is ErrThreadNotFound.
+func TestDeleteThread(t *testing.T) {
+	fix := NewBidiFixtureExecutor()
+	sent := make(chan json.RawMessage, 1)
+	go func() {
+		serveThreadStart(t, fix, "thr_1")
+		id, raw := expectRequest(t, fix, schema.MethodThreadDelete)
+		sent <- raw
+		_ = fix.SendResponse(id, map[string]any{})
+		id, _ = expectRequest(t, fix, schema.MethodThreadDelete)
+		_ = fix.SendErrorResponse(id, rpcCodeInvalidRequest, "no rollout found for thread id thr_1")
+		drainStrayFrames(fix)
+	}()
+	conn, th := connectFake(t, fix)
+	r := &conn.childReg
+	r.mu.Lock()
+	r.init()
+	r.add(&ChildThread{ThreadID: "thr_c", ParentThreadID: "thr_1"})
+	r.add(&ChildThread{ThreadID: "thr_gc", ParentThreadID: "thr_c"})
+	r.add(&ChildThread{ThreadID: "thr_other", ParentThreadID: "thr_2"})
+	r.mu.Unlock()
+
+	if err := conn.DeleteThread(context.Background(), th.ID); err != nil {
+		t.Fatalf("DeleteThread: %v", err)
+	}
+	var p schema.ThreadDeleteParams
+	_ = json.Unmarshal(<-sent, &p)
+	if p.ThreadID != "thr_1" {
+		t.Errorf("params = %+v", p)
+	}
+	if conn.lookupThread("thr_1") != nil {
+		t.Error("deleted thread still registered")
+	}
+	for _, id := range []string{"thr_c", "thr_gc"} {
+		if _, ok := conn.ChildThread(id); ok {
+			t.Errorf("subagent %s of the deleted thread still reported", id)
+		}
+	}
+	if _, ok := conn.ChildThread("thr_other"); !ok {
+		t.Error("another thread's subagent was forgotten")
+	}
+	if err := conn.DeleteThread(context.Background(), th.ID); !errors.Is(err, ErrThreadNotFound) {
+		t.Errorf("DeleteThread on a missing thread = %v, want ErrThreadNotFound", err)
+	}
+}
+
+// TestDispatch_ThreadDeleted: codex announces a delete.
+func TestDispatch_ThreadDeleted(t *testing.T) {
+	c, sub := newDispatchConn(t, "t1")
+	c.dispatchNotification(schema.MethodThreadDeleted, json.RawMessage(`{"threadId":"t1"}`))
+	ev, ok := recvEvent(t, sub).(*ThreadDeletedEvent)
+	if !ok || ev.ThreadID != "t1" {
+		t.Fatalf("got %#v", ev)
+	}
+}
+
 // TestUserInput_RoundTrip decodes the request codex 0.159.3 sent in Plan
 // mode and encodes the answer shapes it accepts.
 func TestUserInput_RoundTrip(t *testing.T) {
