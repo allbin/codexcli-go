@@ -980,7 +980,7 @@ func (c *Conn) ArchiveThread(ctx context.Context, threadID string) error
 func (c *Conn) DeleteThread(ctx context.Context, threadID string) error
 ```
 
-`DeleteThread` shipped, with `ThreadDeletedEvent` for `thread/deleted`.
+`DeleteThread` shipped in v0.10.0, with `ThreadDeletedEvent` for `thread/deleted`.
 
 `SetThreadName` mirrors `claudecli-go.Session.RenameSession`. Add the `thread/name/updated`
 notification too — codex renames threads on its own, so a cached title goes stale.
