@@ -15,6 +15,49 @@ or pin a specific version (e.g. `@v0.12.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cancelling `Update` on unix no longer kills a started `npm install -g`,
+  which could leave no codex on PATH.** Cancellation sent SIGINT to npm's
+  process group and killed it five seconds later. npm answers SIGINT by
+  rolling back, and the rollback can take longer than that; a kill during
+  it left no `bin/codex`, only a stray `bin/.codex-*` link and
+  `lib/node_modules/@openai/.codex-*`. Reproduced through `Update` against
+  throwaway prefixes, npm 11.19.0 / node 24, 0.160.0 → 0.160.1: 3 of 37
+  cancels 1–5.5 s into npm broke the install on a normally busy machine,
+  and 6 of 6 under synthetic CPU and disk load, every one killed exactly
+  five seconds after the cancel. Now a started npm install is never killed
+  by cancellation, as on Windows since 0.12.0: on unix SIGINT is still
+  sent, `Update` waits for npm to exit and reports what it did, and only an
+  npm still running ten minutes after the cancellation is killed (five
+  seconds after a last SIGINT). A cancelled call therefore returns when
+  npm's rollback ends — under two seconds idle, up to about seven and a
+  half under load — rather than within five; its worst case, for an npm
+  that ignores the signal, is ten minutes after the cancellation rather
+  than five seconds. After the change, 28 of 28 cancels idle and 12 of 12 under
+  the same load left a working codex, 8 of those with npm still rolling
+  back 5.1–7.3 s after the SIGINT. A cancellation before `npm install`
+  starts still returns at once.
+- An npm install that finished although `Update` was cancelled is reported
+  as the success it is; on unix it came back as an `ErrUpdateFailed`.
+  npm can also exit 1 on a late SIGINT with the new version already in
+  place: that stays a failure, with `Changed` and `VersionAfter` saying so.
+
+### Changed
+
+- A failure caused by cancelling `Update` also matches `context.Canceled`
+  or `context.DeadlineExceeded`, alongside `ErrUpdateFailed`.
+- A cancelled standalone `codex update` keeps SIGINT followed by a kill
+  five seconds later; `Update`'s doc now says why that is safe. Checked
+  through `Update` in a sandboxed `HOME`/`CODEX_HOME`, 0.160.0 → 0.160.1:
+  47 cancels from the start of the download to the end of unpacking, 18
+  of them under CPU and disk load, all stopped within two seconds of the
+  SIGINT with 0.160.0 still current, so the kill never landed; the installer switches releases by
+  rename only once the new one is unpacked. It leaves a
+  `releases/.staging.*` directory, which its next run removes.
+- `TestLive_NPMUpdateCancel` and `TestLive_StandaloneUpdateCancel` repeat
+  these checks against throwaway installs.
+
 ## [0.12.0] - 2026-10-06
 
 `Update` acts for an npm-global install on Windows. The layout, the proof,

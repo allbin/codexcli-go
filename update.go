@@ -19,14 +19,16 @@ import (
 // a consumer forever, not to cut a slow network short.
 const defaultUpdateTimeout = 10 * time.Minute
 
-// updateInterruptGrace is how long a cancelled update is given to unwind after
-// its interrupt signal before the process is killed outright. The standalone
-// installer stages a download in a temporary directory and swaps symlinks into
-// place at the end, and it removes that directory from an EXIT/INT/TERM trap —
-// so letting it notice the signal is what keeps a cancelled update from
-// leaving a half-unpacked release tree behind. Unix only: on Windows no
-// interrupt is deliverable and cancellation kills the tree immediately, so
-// this bounds only the pipe teardown there.
+// updateInterruptGrace is how long a cancelled `codex update` is given to
+// unwind after its interrupt signal before the process is killed outright. The
+// standalone installer stages a download in a temporary directory and swaps
+// symlinks into place at the end, and it removes that directory from an
+// EXIT/INT/TERM trap — so letting it notice the signal is what keeps a
+// cancelled update from leaving a half-unpacked release tree behind. It does
+// not apply to a cancelled `npm install -g`, which is waited for instead (see
+// updaterRun.waitOnCancel). Unix only: on Windows no interrupt is deliverable
+// and cancellation kills the tree immediately, so this bounds only the pipe
+// teardown there.
 const updateInterruptGrace = 5 * time.Second
 
 // maxUpdateOutputLines caps the transcript kept in UpdateResult.Output. The
@@ -257,7 +259,9 @@ func WithUpdateProgress(fn func(string)) UpdateOption {
 }
 
 // WithUpdateTimeout bounds the updater run. It applies only when the caller's
-// context has no deadline of its own; a context deadline always wins.
+// context has no deadline of its own; a context deadline always wins. Reaching
+// it is a cancellation like any other, so a started npm install is waited for
+// past it; see [Update].
 func WithUpdateTimeout(d time.Duration) UpdateOption {
 	return func(o *updateOptions) { o.timeout = d }
 }
@@ -431,27 +435,55 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 // exactly that version, or the run is [ErrUpdateFailed].
 //
 // The caller's context deadline is honoured. Without one the run is bounded by
-// [WithUpdateTimeout], defaulting to ten minutes. On unix a cancelled run is
-// interrupted rather than killed outright — SIGINT to the updater's process
-// group — so the installer can unwind its staged download, and npm can roll
-// back, instead of leaving a partial tree behind. On Windows no interrupt is
-// deliverable from a windowless parent; the only stop is a tree kill via a
-// job object, so:
+// [WithUpdateTimeout], defaulting to ten minutes. Cancellation — the context
+// ending for any reason, deadline included — means:
 //
-//   - A Windows `npm install -g`, once started, is not stopped by
-//     cancellation: Update waits for npm to exit and reports what it did,
-//     success included. Killing it was observed to leave the install broken —
-//     npm renames the old package and shims aside before it downloads the new
-//     one, so a kill a few seconds in left no codex.cmd on PATH and a
-//     half-extracted package. Its only bound is ten minutes from start, for an
-//     npm that has wedged; a kill there can leave that same state, which
-//     running [InstallInfo.UpdateCmd] repairs. The process calling Update
-//     exiting mid-install kills npm with it, with the same effect.
-//   - A cancellation before npm install starts — during detection or `npm
-//     view` — stops there, and nothing is installed.
-//   - A cancelled standalone `codex update` is killed immediately and may
-//     leave a staged partial download for the installer to clean up on its
-//     next run.
+//   - Before `npm install -g` starts — during detection or `npm view` — the
+//     call stops there, and nothing is installed.
+//   - A started `npm install -g` is never killed by cancellation, on any
+//     platform: npm renames the old package and bin links aside before it
+//     extracts the new one, and a kill before it puts them back leaves no
+//     codex on PATH (on unix, a stray `bin/.codex-*` link instead of
+//     `bin/codex`). Update waits for npm to exit and reports what it did,
+//     and the re-read version decides, as always: an npm that finished
+//     anyway is a success. One that exits non-zero is a failure even when
+//     the new version is in place — npm was seen exiting 1 on a late SIGINT
+//     with the install complete — so read [UpdateResult.Changed] and
+//     VersionAfter alongside the error.
+//   - On unix npm is told: SIGINT to its process group, which it answers by
+//     rolling back and exiting 1, so a cancelled npm update returns once the
+//     rollback is done: measured on npm 11.19.0 / node 24 with codex's
+//     447 MB package at under two seconds on an idle machine and up to
+//     about seven and a half under CPU and disk load. Only an npm still
+//     running ten minutes after the cancellation is killed.
+//   - On Windows no interrupt is deliverable from a windowless parent; the
+//     only stop is a tree kill via a job object. So npm is not told, runs to
+//     completion and reports what it did, and is killed only ten minutes
+//     after it started.
+//   - A standalone `codex update` is interrupted — SIGINT to its process
+//     group on unix — so the installer can remove its staged download, and
+//     killed if still running five seconds later; on Windows it is killed at
+//     once. Either leaves the release that was running: the installer
+//     unpacks into a staging directory and switches the `current` and bin
+//     links by rename only after the new release is complete. On unix,
+//     cancelled while downloading or unpacking, it was checked to stop
+//     within two seconds of the SIGINT, under load included, with the old
+//     release still current; a `.staging.*` directory it leaves is removed
+//     by its next run.
+//
+// So a cancelled call returns, at the latest: for a started npm install on
+// unix, ten minutes after the cancellation plus updateInterruptGrace for the
+// kill; on Windows, ten minutes after npm started plus the same; either way
+// plus up to five seconds to re-read the version. A run nobody cancels is
+// cancelled by its deadline, so a default call whose npm wedges on unix can
+// take about twenty minutes. In practice a cancelled npm update returns when
+// npm finishes its rollback.
+//
+// A failure caused by cancellation matches [context.Canceled] (or
+// [context.DeadlineExceeded]) as well as [ErrUpdateFailed]. The process
+// calling Update exiting mid-install kills npm with it, with the same effect
+// as a kill; running [InstallInfo.UpdateCmd] repairs that, as it does after
+// the ten-minute kill.
 func Update(ctx context.Context, opts ...UpdateOption) (*UpdateResult, error) {
 	return defaultInstallClient.Update(ctx, opts...)
 }
@@ -514,17 +546,22 @@ type updaterRun struct {
 	args    []string
 	pathDir string
 
-	// finishOnCancel means a cancellation arriving after the updater started
-	// does not stop it: the run is bounded by uncancellableUpdateLimit alone,
-	// and Update reports whatever it did. A run not yet started when the
-	// context ends is not started.
-	finishOnCancel bool
+	// waitOnCancel means a cancellation arriving after the updater started
+	// never kills it, and Update waits for it to exit and reports what it
+	// did. On unix the cancellation reaches it as SIGINT to its process
+	// group, which npm answers by rolling back; it is killed only if still
+	// running uncancellableUpdateLimit after that. On Windows nothing can be
+	// delivered, so it runs to completion, killed only
+	// uncancellableUpdateLimit after it started. A run not yet started when
+	// the context ends is not started.
+	waitOnCancel bool
 }
 
-// uncancellableUpdateLimit bounds an updater run that ignores cancellation
-// (a Windows `npm install -g`). It exists to stop a wedged npm holding the
-// caller forever; killing npm at this point can leave the install broken,
-// which is still better than never returning.
+// uncancellableUpdateLimit bounds an updater run that cancellation does not
+// kill (an `npm install -g`): from the cancellation on unix, from the start on
+// Windows. It exists to stop a wedged npm holding the caller forever; killing
+// npm at this point can leave the install broken, which is still better than
+// never returning.
 const uncancellableUpdateLimit = defaultUpdateTimeout
 
 func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) updateEnv {
@@ -540,15 +577,22 @@ func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) u
 			if run.pathDir != "" {
 				overrides = withPathPrefix(childEnv, run.pathDir)
 			}
-			if run.finishOnCancel {
-				if err := ctx.Err(); err != nil {
-					return -1, err
-				}
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), uncancellableUpdateLimit)
-				defer cancel()
+			if !run.waitOnCancel {
+				return execUpdater(ctx, nil, 0, run.name, run.args, buildEnv(overrides), workDir, onLine)
 			}
-			return execUpdater(ctx, run.name, run.args, buildEnv(overrides), workDir, onLine)
+			// A cancellation landing between this check and the start is
+			// delivered at once on unix, before npm has its handlers or has
+			// touched anything; on Windows that npm runs.
+			if err := ctx.Err(); err != nil {
+				return -1, err
+			}
+			if !updaterInterruptible {
+				hard, cancel := context.WithTimeout(context.WithoutCancel(ctx), uncancellableUpdateLimit)
+				defer cancel()
+				return execUpdater(hard, nil, 0, run.name, run.args, buildEnv(overrides), workDir, onLine)
+			}
+			return execUpdater(context.WithoutCancel(ctx), ctx.Done(), uncancellableUpdateLimit,
+				run.name, run.args, buildEnv(overrides), workDir, onLine)
 		},
 	}
 }
@@ -579,7 +623,13 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd, Reason: err.Error()}
 		}
 		npm = plan
-		run = updaterRun{name: plan.npm, pathDir: plan.pathDir, finishOnCancel: plan.finishOnCancel}
+		// npm renames the old package and bin links (shims on Windows) aside
+		// before it extracts the new ones, and puts them back only on its
+		// own errors or a signal it catches. A kill in between was observed
+		// to leave no codex on PATH: on Windows a tree kill a few seconds in,
+		// on unix the kill updateInterruptGrace after SIGINT, landing while
+		// npm was still rolling back.
+		run = updaterRun{name: plan.npm, pathDir: plan.pathDir, waitOnCancel: true}
 		targets = plan.targets
 	default:
 		return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd}
@@ -648,7 +698,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 				Path:     npm.npm,
 				ExitCode: -1,
 				Output:   result.Output,
-				Err:      fmt.Errorf("resolve %s@latest: %w", CLIPackageName, err),
+				Err:      withCancellation(ctx, fmt.Errorf("resolve %s@latest: %w", CLIPackageName, err)),
 			}
 		}
 		if latest == info.Version {
@@ -689,7 +739,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			Path:     run.name,
 			ExitCode: exitCode,
 			Output:   result.Output,
-			Err:      runErr,
+			Err:      withCancellation(ctx, runErr),
 		}
 		// A failed run whose version could not be re-read leaves two facts
 		// worth reporting, not one.
@@ -709,6 +759,16 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 		}
 	}
 	return result, nil
+}
+
+// withCancellation adds ctx's error to err when ctx has ended, so a failure
+// caused by cancelling Update matches context.Canceled or
+// context.DeadlineExceeded as well as ErrUpdateFailed.
+func withCancellation(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		return fmt.Errorf("%w: %w", err, ctxErr)
+	}
+	return err
 }
 
 // probeWritable runs the environment's writability check. A missing check is
@@ -877,15 +937,23 @@ func nearestExistingDir(dir string) (string, error) {
 // never contains, and the hidden console set by setUpdateCancel is inherited
 // by cmd.exe and the node it starts, so nothing flashes on screen.
 //
-// On unix, cancellation interrupts rather than kills: the installer traps
+// On unix, ending ctx interrupts rather than kills: the installer traps
 // INT/TERM to remove its staging directory, so SIGINT to the process group
 // gives it — and any children doing the actual download — a moment to unwind
 // before the kill lands after updateInterruptGrace. Windows has no
 // deliverable interrupt from a windowless parent (GenerateConsoleCtrlEvent
-// only reaches processes on the caller's own console), so cancellation there
+// only reaches processes on the caller's own console), so ending ctx there
 // is an immediate job-object tree kill: no grace period, but no orphaned
 // children either.
-func execUpdater(ctx context.Context, name string, args []string, env []string, workDir string, onLine func(string)) (int, error) {
+//
+// soft, when not nil, is a cancellation that asks instead: when it closes
+// the updater gets the interrupt alone (nothing on Windows) and is waited
+// for, and ctx is ended only if the updater is still running softLimit
+// later. npm needs that: it rolls a global install back on SIGINT, and the
+// rollback was measured taking longer than updateInterruptGrace.
+func execUpdater(ctx context.Context, soft <-chan struct{}, softLimit time.Duration, name string, args []string, env []string, workDir string, onLine func(string)) (int, error) {
+	ctx, end := context.WithCancel(ctx)
+	defer end()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = env
 	if workDir != "" {
@@ -903,7 +971,27 @@ func execUpdater(ctx context.Context, name string, args []string, env []string, 
 	err := cmd.Start()
 	if err == nil {
 		pp.afterStart(cmd)
+		exited := make(chan struct{})
+		if soft != nil {
+			go func() {
+				select {
+				case <-soft:
+				case <-exited:
+					return
+				}
+				// Signalling by pid can race the reap in cmd.Wait, as
+				// os/exec's own Cancel does; the pid would have to be
+				// reused in that instant.
+				_ = pp.interrupt(cmd)
+				select {
+				case <-time.After(softLimit):
+					end()
+				case <-exited:
+				}
+			}()
+		}
 		err = cmd.Wait()
+		close(exited)
 	}
 	pp.release()
 	w.flush()

@@ -617,7 +617,7 @@ exit 3
 `)
 
 	var got []string
-	code, err := execUpdater(context.Background(), script, []string{"update"}, os.Environ(), "",
+	code, err := execUpdater(context.Background(), nil, 0, script, []string{"update"}, os.Environ(), "",
 		func(line string) { got = append(got, line) })
 	if err == nil {
 		t.Fatal("err = nil, want the non-zero exit reported")
@@ -649,7 +649,7 @@ sleep 30
 
 	go func() {
 		defer close(done)
-		_, _ = execUpdater(ctx, script, []string{"update"}, os.Environ(), "", func(line string) {
+		_, _ = execUpdater(ctx, nil, 0, script, []string{"update"}, os.Environ(), "", func(line string) {
 			if strings.Contains(line, "started") {
 				once.Do(func() { close(started) })
 			}
@@ -668,5 +668,28 @@ sleep 30
 	case <-done:
 	case <-time.After(15 * time.Second):
 		t.Fatal("execUpdate did not return after cancellation")
+	}
+}
+
+func TestExecUpdaterSoftCancelBackstop(t *testing.T) {
+	// An updater that ignores the interrupt is still ended once softLimit
+	// passes: a wedged npm cannot hold Update forever.
+	script := fakeCodexScript(t, `
+trap '' INT
+echo started
+exec sleep 30
+`)
+	soft := make(chan struct{})
+	start := time.Now()
+	_, err := execUpdater(context.Background(), soft, 100*time.Millisecond, script, nil, os.Environ(), "", func(line string) {
+		if line == "started" {
+			close(soft)
+		}
+	})
+	if err == nil {
+		t.Fatal("err = nil, want the killed run reported")
+	}
+	if took := time.Since(start); took > updateInterruptGrace+5*time.Second {
+		t.Errorf("took %s, want the kill at softLimit plus updateInterruptGrace", took)
 	}
 }

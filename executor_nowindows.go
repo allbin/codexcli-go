@@ -32,16 +32,24 @@ func setPlatformAttrs(cmd *exec.Cmd) *platformProc {
 	return &platformProc{}
 }
 
-// setUpdateCancel configures cancellation for the `codex update` spawn:
-// SIGINT the whole process group so the installer — and any children doing
-// the actual download — can unwind its staged release tree. The caller's
-// WaitDelay provides the eventual kill.
+// updaterInterruptible reports that a running updater can be asked to stop:
+// on unix, by SIGINT to its process group.
+const updaterInterruptible = true
+
+// setUpdateCancel configures cancellation for an updater spawn: SIGINT the
+// whole process group so the installer — and any children doing the actual
+// download — can unwind its staged release tree, and npm can roll back. The
+// caller's WaitDelay provides the eventual kill.
 func setUpdateCancel(cmd *exec.Cmd) *platformProc {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
-	}
-	return &platformProc{}
+	p := &platformProc{}
+	cmd.Cancel = func() error { return p.interrupt(cmd) }
+	return p
+}
+
+// interrupt sends SIGINT to the updater's process group.
+func (p *platformProc) interrupt(cmd *exec.Cmd) error {
+	return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
 }
 
 // afterStart finalizes process-tree confinement once the child is running.

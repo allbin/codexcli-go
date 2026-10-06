@@ -55,21 +55,29 @@ func setPlatformAttrs(cmd *exec.Cmd) *platformProc {
 	return p
 }
 
+// updaterInterruptible reports that a running updater cannot be asked to
+// stop: Windows cannot deliver a console interrupt from a windowless parent
+// (GenerateConsoleCtrlEvent only reaches processes on the caller's own
+// console).
+const updaterInterruptible = false
+
 // setUpdateCancel configures cancellation for an updater spawn (`codex
-// update`, or npm.cmd). Windows cannot deliver a console interrupt from a
-// windowless parent (GenerateConsoleCtrlEvent only reaches processes on the
-// caller's own console), so cancellation is an immediate tree kill via the
-// job object: no grace period for the installer to unwind its staged
-// download, but no orphaned children either. Because a kill mid-reify breaks
-// an npm install, `npm install -g` runs under a context the caller's
-// cancellation does not reach (see updaterRun.finishOnCancel), and this kill
-// fires only at its hard limit.
+// update`, or npm.cmd). With no interrupt to deliver, cancellation is an
+// immediate tree kill via the job object: no grace period for the installer
+// to unwind its staged download, but no orphaned children either. Because a
+// kill mid-reify breaks an npm install, `npm install -g` runs under a context
+// the caller's cancellation does not reach (see updaterRun.waitOnCancel), and
+// this kill fires only at its hard limit.
 func setUpdateCancel(cmd *exec.Cmd) *platformProc {
 	hideConsoleWindow(cmd)
 	p := &platformProc{job: newKillOnCloseJob()}
 	cmd.Cancel = func() error { return p.killTree(cmd) }
 	return p
 }
+
+// interrupt does nothing: there is no interrupt to deliver. See
+// updaterInterruptible.
+func (p *platformProc) interrupt(*exec.Cmd) error { return nil }
 
 // killTree terminates cmd's whole process tree via the job object,
 // degrading to killing just the direct child when the job is unusable.

@@ -136,12 +136,6 @@ func proveNPMUpdateWindows(ctx context.Context, info *InstallInfo, env installEn
 		pinPrefix: reported,
 		targets:   []string{filepath.Join(prefix, "node_modules"), prefix},
 		inUse:     append([]string{pkgRoot}, shims...),
-		// npm renames the old package and shims aside before it downloads and
-		// extracts the new ones, and rolls back only on its own errors or a
-		// signal it can catch. Windows has no interrupt to give it, and a tree
-		// kill in that window was observed to leave no codex.cmd on PATH and a
-		// half-extracted package.
-		finishOnCancel: true,
 	}, nil
 }
 

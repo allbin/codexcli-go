@@ -53,10 +53,6 @@ type npmUpdatePlan struct {
 	// another process when it starts — Windows only, nil on unix. See
 	// firstFileInUse.
 	inUse []string
-
-	// finishOnCancel lets a started `npm install -g` run to completion when
-	// the caller cancels — Windows only. See updaterRun.finishOnCancel.
-	finishOnCancel bool
 }
 
 // errNPMUnproven is the reason an npm-global install stays manual. It never

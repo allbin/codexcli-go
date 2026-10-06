@@ -119,9 +119,6 @@ func TestNPMUpdateWindows_OwnPrefixIsProven(t *testing.T) {
 	if strings.Join(plan.inUse, "|") != strings.Join(wantInUse, "|") {
 		t.Errorf("inUse = %v, want %v", plan.inUse, wantInUse)
 	}
-	if !plan.finishOnCancel {
-		t.Error("finishOnCancel = false: a cancelled Windows npm install would be killed mid-reify")
-	}
 	if want := []string{f.npm + "|" + filepath.Dir(f.npm)}; strings.Join(f.prefixCalls, ",") != strings.Join(want, ",") {
 		t.Errorf("prefix -g calls = %v, want %v", f.prefixCalls, want)
 	}
@@ -369,7 +366,7 @@ func TestNPMUpdateWindows_RunsTheProvenNPM(t *testing.T) {
 	if got, want := strings.Join(s.ran.args, " "), "install --global --prefix "+f.prefix+" @openai/codex@0.160.1"; got != want {
 		t.Errorf("args = %q, want %q: version and prefix pinned", got, want)
 	}
-	if !s.ran.finishOnCancel {
+	if !s.ran.waitOnCancel {
 		t.Error("the Windows install run is cancellable; a kill mid-reify breaks the install")
 	}
 	if len(s.probed) != 1 || s.probed[0][0] != f.pkgRoot {
@@ -471,7 +468,9 @@ func TestWindowsRunnableExts(t *testing.T) {
 
 // fakeUpdaterScript writes a stand-in updater that prints "started", waits
 // about two seconds and prints "done": a batch file on Windows, so the real
-// .cmd exec path is the one exercised there.
+// .cmd exec path is the one exercised there. On unix it answers SIGINT the
+// way npm does, by printing "interrupted", taking a second to "roll back",
+// and exiting 1.
 func fakeUpdaterScript(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -481,11 +480,14 @@ func fakeUpdaterScript(t *testing.T) string {
 		return name
 	}
 	name := filepath.Join(dir, "npm")
-	mustWrite(t, name, "#!/bin/sh\necho started\nsleep 2\necho done\n", 0o755)
+	mustWrite(t, name, "#!/bin/sh\ntrap 'echo interrupted; sleep 1; echo rolled back; exit 1' INT\necho started\nsleep 2\necho done\n", 0o755)
 	return name
 }
 
-func TestUpdaterRunFinishOnCancel(t *testing.T) {
+func TestUpdaterRunWaitOnCancel(t *testing.T) {
+	// A started run is not killed by cancellation, and is waited for: run to
+	// completion on Windows, where nothing can be delivered; interrupted and
+	// given its rollback on unix.
 	script := fakeUpdaterScript(t)
 	env := osUpdateEnv("", nil, "")
 
@@ -494,7 +496,7 @@ func TestUpdaterRunFinishOnCancel(t *testing.T) {
 	var mu sync.Mutex
 	var lines []string
 	start := time.Now()
-	code, err := env.runUpdate(ctx, updaterRun{name: script, finishOnCancel: true}, func(line string) {
+	code, err := env.runUpdate(ctx, updaterRun{name: script, waitOnCancel: true}, func(line string) {
 		mu.Lock()
 		lines = append(lines, line)
 		mu.Unlock()
@@ -502,11 +504,15 @@ func TestUpdaterRunFinishOnCancel(t *testing.T) {
 			cancel()
 		}
 	})
-	if err != nil || code != 0 {
-		t.Fatalf("run = %d, %v; want a clean exit despite the cancellation", code, err)
+	wantLines, wantCode := "started|done", 0
+	if updaterInterruptible {
+		wantLines, wantCode = "started|interrupted|rolled back", 1
 	}
-	if got := strings.Join(lines, "|"); got != "started|done" {
-		t.Errorf("lines = %q, want the run to finish", got)
+	if code != wantCode || (err == nil) != (wantCode == 0) {
+		t.Fatalf("run = %d, %v; want the stand-in's own exit %d", code, err, wantCode)
+	}
+	if got := strings.Join(lines, "|"); got != wantLines {
+		t.Errorf("lines = %q, want %q", got, wantLines)
 	}
 	if time.Since(start) < time.Second {
 		t.Error("returned before the stand-in could have finished")
@@ -514,7 +520,7 @@ func TestUpdaterRunFinishOnCancel(t *testing.T) {
 
 	// A run whose context ended before it started is never started.
 	lines = nil
-	code, err = env.runUpdate(ctx, updaterRun{name: script, finishOnCancel: true}, func(line string) { lines = append(lines, line) })
+	code, err = env.runUpdate(ctx, updaterRun{name: script, waitOnCancel: true}, func(line string) { lines = append(lines, line) })
 	if !errors.Is(err, context.Canceled) || code != -1 || len(lines) != 0 {
 		t.Errorf("run = %d, %v, lines %v; want it not started", code, err, lines)
 	}

@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // npmFixture is a real npm-global layout in a temp dir: a node prefix holding
@@ -319,6 +321,130 @@ func TestNPMUpdate_CleanExitWithoutNewVersionFails(t *testing.T) {
 	}
 	if result == nil || result.Changed || result.VersionAfter != "0.154.0" {
 		t.Errorf("result = %+v, want unchanged numbers alongside the error", result)
+	}
+}
+
+// fakeNPM replaces the prefix's npm with one that logs its argv, answers
+// `prefix -g` with the fixture's own prefix, and runs cases, a body of shell
+// case arms, for everything else.
+func (f *npmFixture) fakeNPM(t *testing.T, cases string) {
+	t.Helper()
+	mustWrite(t, filepath.Join(f.prefix, "bin", "npm"), `#!/bin/sh
+echo "$*" >> '`+f.npmLog+`'
+case "$1" in
+prefix) echo '`+f.prefix+`' ;;
+`+cases+`
+esac
+`, 0o755)
+}
+
+// cancelOn returns a progress callback that cancels when a line equals want,
+// and the time it did.
+func cancelOn(want string, cancel context.CancelFunc) (func(string), *[]string, func() time.Time) {
+	var (
+		mu    sync.Mutex
+		lines []string
+		at    time.Time
+	)
+	return func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, line)
+			if line == want && at.IsZero() {
+				at = time.Now()
+				cancel()
+			}
+		}, &lines, func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return at
+		}
+}
+
+func TestNPMUpdate_CancelWaitsForRollback(t *testing.T) {
+	// npm answers SIGINT by rolling the half-done install back, and was
+	// measured taking up to five seconds to do it. A kill in that window
+	// left no codex on PATH, so a cancelled Update must wait it out — here
+	// for a rollback longer than updateInterruptGrace — and report the
+	// cancellation, with the version that is still installed.
+	f := newNPMFixture(t, "0.154.0", "0.155.0", ownPrefix, true)
+	f.fakeNPM(t, `view) echo 0.155.0 ;;
+install)
+  trap 'echo rolling back; sleep 6; echo rolled back; exit 1' INT
+  echo installing
+  i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+  echo 0.155.0 > '`+f.state+`'
+  ;;`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	onLine, lines, cancelledAt := cancelOn("installing", cancel)
+	result, err := New().Update(ctx, WithUpdateProgress(onLine))
+	waited := time.Since(cancelledAt())
+
+	var failed *UpdateFailedError
+	if !errors.As(err, &failed) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want an *UpdateFailedError matching context.Canceled", err)
+	}
+	if failed.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want npm's own 1 after its rollback, not a kill", failed.ExitCode)
+	}
+	if got := strings.Join(*lines, "|"); !strings.Contains(got, "rolling back|rolled back") {
+		t.Errorf("progress = %q, want the rollback to have finished", got)
+	}
+	if waited < updateInterruptGrace {
+		t.Errorf("returned %s after the cancel, before the rollback could finish", waited)
+	}
+	if result == nil || result.Changed || result.VersionAfter != "0.154.0" {
+		t.Errorf("result = %+v, want the version still installed", result)
+	}
+}
+
+func TestNPMUpdate_CancelAfterCommitReportsSuccess(t *testing.T) {
+	// A cancellation that lands once npm is past the point of rolling back
+	// does not turn a finished install into a failure: the version moved.
+	f := newNPMFixture(t, "0.154.0", "0.155.0", ownPrefix, true)
+	f.fakeNPM(t, `view) echo 0.155.0 ;;
+install)
+  trap '' INT
+  echo installing
+  sleep 1
+  echo 0.155.0 > '`+f.state+`'
+  ;;`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	onLine, _, _ := cancelOn("installing", cancel)
+	result, err := New().Update(ctx, WithUpdateProgress(onLine))
+	if err != nil {
+		t.Fatalf("Update: %v, want the finished install reported", err)
+	}
+	if !result.Changed || result.VersionAfter != "0.155.0" {
+		t.Errorf("result = %+v, want 0.154.0 → 0.155.0", result)
+	}
+}
+
+func TestNPMUpdate_CancelBeforeInstallIsImmediate(t *testing.T) {
+	// Before npm install starts nothing is at stake: a cancellation during
+	// `npm view` stops there, and nothing is installed.
+	f := newNPMFixture(t, "0.154.0", "0.155.0", ownPrefix, true)
+	f.fakeNPM(t, `view) exec sleep 30 ;;
+install) echo 0.155.0 > '`+f.state+`' ;;`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	onLine, _, cancelledAt := cancelOn("Resolving @openai/codex@latest", cancel)
+	_, err := New().Update(ctx, WithUpdateProgress(onLine))
+	if !errors.Is(err, ErrUpdateFailed) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want ErrUpdateFailed matching context.Canceled", err)
+	}
+	if waited := time.Since(cancelledAt()); waited > 2*time.Second {
+		t.Errorf("returned %s after the cancel, want at once", waited)
+	}
+	for _, call := range f.npmCalls(t) {
+		if strings.HasPrefix(call, "install") {
+			t.Errorf("ran npm %q after the cancellation", call)
+		}
 	}
 }
 
