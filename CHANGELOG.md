@@ -15,6 +15,28 @@ or pin a specific version (e.g. `@v0.10.0`).
 
 ## [Unreleased]
 
+### Changed
+
+- **`Update` and `InstallInfo.SelfManaged` accept an npm-global install
+  whose prefix has no npm of its own** — a system node with a user-level
+  prefix in `.npmrc` (`prefix=~/.local`), the usual way to install globally
+  without sudo. These were refused as manual before. When nothing exists at
+  `<prefix>/bin/npm`, the first `npm` on the subprocess `PATH` (`WithEnv`'s
+  `PATH` if set) is resolved once and run by that absolute path for
+  `prefix -g`, `view` and `install -g`. It must resolve to npm's own
+  `bin/npm-cli.js`, so Volta, asdf, mise and corepack shims stay manual
+  (Volta answers `prefix -g` from npm's config but installs `-g` into its
+  own image). Its `#!` node must be an executable file, and that node's
+  directory goes first on the child's `PATH`. Its `install -g` carries
+  `--prefix <what prefix -g reported>`, so a node switch between proof and
+  install cannot move an execPath-derived prefix. The `prefix -g` match against
+  the package root `PATH` runs is unchanged, as is everything when
+  `<prefix>/bin/npm` exists. Checked on a system npm 11.19.0 / node 24 with
+  `prefix=~/.local`: detection reports `SelfManaged` true (three runs), and
+  a real update in a temp prefix moved 0.160.0 → 0.160.1 with no other
+  prefix touched, while a client configured for another prefix was refused
+  (three runs, `TestLive_NPMUpdateThrowawayPrefix`).
+
 ## [0.10.0] - 2026-10-02
 
 Threads can be deleted. What codex removes was checked live on 0.160.0,

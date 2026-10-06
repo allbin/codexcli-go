@@ -221,12 +221,12 @@ var defaultInstallClient = New()
 // Detection is offline: it resolves the binary with exec.LookPath and
 // filepath.EvalSymlinks, reads package metadata next to the resolved path,
 // resolves codex's standalone-install symlink under CODEX_HOME, and runs
-// `codex --version`. For an npm-global install it also runs the prefix's own
-// `npm prefix -g` and creates and removes a probe file in the npm prefix, to
-// decide InstallInfo.SelfManaged. It starts no session, leaves nothing behind,
-// and makes no network calls. Notably it does not shell out to `codex doctor`, which
-// reports a superset of these facts but spends ~400ms of network to do it —
-// see [Doctor] if you want that report and can pay for it.
+// `codex --version`. For an npm-global install it also runs `npm prefix -g`
+// with the npm [Update] would run, and creates and removes a probe file in the
+// npm prefix, to decide InstallInfo.SelfManaged. It starts no session, leaves
+// nothing behind, and makes no network calls. Notably it does not shell out to
+// `codex doctor`, which reports a superset of these facts but spends ~400ms of
+// network to do it — see [Doctor] if you want that report and can pay for it.
 //
 // Fetching the *published* version (via `npm view`, the GitHub releases API,
 // or anything else) is the caller's business — this reports only what is
@@ -259,8 +259,8 @@ var defaultInstallClient = New()
 // prefix being written and works even when the shim is broken.
 //
 // UpdateCmd is what to show a user. It is not what [Update] runs: for an npm
-// install whose prefix is proven, Update runs the prefix's own npm by absolute
-// path instead, and InstallInfo.SelfManaged says whether it will.
+// install whose prefix is proven, Update runs the proven npm by absolute path
+// instead, and InstallInfo.SelfManaged says whether it will.
 //
 // The Homebrew command (`brew upgrade --cask codex`) and the cask name come
 // from codex's own binary. Homebrew and winget layouts are classified from the
@@ -323,9 +323,15 @@ type installEnv struct {
 	runVersion  func(ctx context.Context, binary string) (string, error)
 	codexHome   string // WithCodexHome, else $CODEX_HOME, else ~/.codex
 
-	// npmPrefix runs `<npm> prefix -g` with binDir first on PATH. Only an
+	// npmPrefix runs `<npm> prefix -g` with pathDir first on PATH. Only an
 	// npm-global install whose update is being proven calls it.
-	npmPrefix func(ctx context.Context, npm, binDir string) (string, error)
+	npmPrefix func(ctx context.Context, npm, pathDir string) (string, error)
+
+	// childPath is the PATH an npm subprocess starts from, before anything is
+	// put first on it: the [WithEnv] override when one is set, else this
+	// process's. A prefix without its own npm looks npm up here, so the
+	// lookup sees what the install will.
+	childPath string
 
 	// writable reports whether this process could write into dir.
 	writable func(dir string) error
@@ -344,19 +350,24 @@ func osInstallEnv(codexHomeOverride string) installEnv {
 		readFile:    readSmallFile,
 		runVersion:  runVersionProbe,
 		codexHome:   home,
-		npmPrefix: func(ctx context.Context, npm, binDir string) (string, error) {
-			return runNPMPrefix(ctx, npm, binDir, nil, "")
+		npmPrefix: func(ctx context.Context, npm, pathDir string) (string, error) {
+			return runNPMPrefix(ctx, npm, pathDir, nil, "")
 		},
-		writable: checkWritable,
+		childPath: os.Getenv("PATH"),
+		writable:  checkWritable,
 	}
 }
 
-// withChildEnv returns env with the npm prefix probe run under the subprocess
-// overrides ([WithEnv], [WithWorkDir]) — the environment an npm update would
-// run under, and so the one whose npm config decides where it writes.
+// withChildEnv returns env with the npm prefix probe run, and npm looked up,
+// under the subprocess overrides ([WithEnv], [WithWorkDir]) — the environment
+// an npm update would run under, and so the one whose npm config decides where
+// it writes.
 func (e installEnv) withChildEnv(overrides map[string]string, workDir string) installEnv {
-	e.npmPrefix = func(ctx context.Context, npm, binDir string) (string, error) {
-		return runNPMPrefix(ctx, npm, binDir, overrides, workDir)
+	e.npmPrefix = func(ctx context.Context, npm, pathDir string) (string, error) {
+		return runNPMPrefix(ctx, npm, pathDir, overrides, workDir)
+	}
+	if p, ok := overrides["PATH"]; ok {
+		e.childPath = p
 	}
 	return e
 }
@@ -583,6 +594,10 @@ func npmEvidence(p string, env installEnv) (packageManager string, src InstallSo
 const maxPackageWalkUp = 8
 
 func isCLIPackageJSON(file string, env installEnv) bool {
+	return isPackageNamed(file, CLIPackageName, env)
+}
+
+func isPackageNamed(file, name string, env installEnv) bool {
 	b, err := env.readFile(file)
 	if err != nil {
 		return false
@@ -593,7 +608,7 @@ func isCLIPackageJSON(file string, env installEnv) bool {
 	if json.Unmarshal(b, &pkg) != nil {
 		return false
 	}
-	return pkg.Name == CLIPackageName
+	return pkg.Name == name
 }
 
 // nodePackageManager reports which of npm, pnpm or bun owns a node-package

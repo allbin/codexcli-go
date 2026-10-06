@@ -112,8 +112,8 @@ var ErrUpdateFailed = errors.New("codexcli: codex update failed")
 // [UpdateResult] is still returned alongside it, so the before/after versions
 // and the captured output are available for diagnosis.
 type UpdateFailedError struct {
-	// Path is the updater that was executed: the codex PATH entry, or the npm
-	// inside the install's own prefix.
+	// Path is the updater that was executed: the codex PATH entry, or the
+	// proven npm (see [UpdateResult.Updater]).
 	Path string
 
 	// ExitCode is the updater's exit status, or -1 when it never ran to
@@ -165,7 +165,9 @@ type UpdateResult struct {
 	Path string
 
 	// Updater is the executable that was run: Path for a standalone install,
-	// `<prefix>/bin/npm` for an npm-global one.
+	// the proven npm for an npm-global one — `<prefix>/bin/npm`, or the npm
+	// found on the child's PATH when the prefix has none, as found (not
+	// resolved to npm-cli.js).
 	Updater string
 
 	// VersionBefore is what the CLI reported for itself before the run, or ""
@@ -241,8 +243,8 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //   - [InstallNative] — codex's own standalone installer layout under
 //     CODEX_HOME — by running `codex update`.
 //   - [InstallNPMGlobal] owned by npm, on unix, when the npm update target is
-//     proven to be the tree PATH runs (below) — by running
-//     `<prefix>/bin/npm install -g @openai/codex@latest`.
+//     proven to be the tree PATH runs (below) — by running that proven npm,
+//     by absolute path, as `npm install -g @openai/codex@<latest>`.
 //
 // Every other install is refused with a [ManualUpdateError] carrying
 // [InstallInfo.UpdateCmd] verbatim for the user to run: pnpm, bun, Homebrew,
@@ -263,9 +265,9 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //     and when they do, the "update" installs a second copy whose visibility
 //     depends on PATH order. A library that owns the codex command must not
 //     create that state on a user's machine.
-//   - It finds npm on PATH, which a service generally does not have the
-//     right one of, and codex does not check: with npm absent it still exits
-//     0 and prints "Update ran successfully!".
+//   - It finds npm on PATH and runs whatever answers, checking neither where
+//     that npm writes nor that it ran: with npm absent it still exits 0 and
+//     prints "Update ran successfully!".
 //
 // # The npm proof
 //
@@ -274,19 +276,43 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //
 //   - The resolved binary sits under `<prefix>/lib/node_modules/@openai/codex`
 //     with a package.json naming the CLI.
-//   - `<prefix>/bin/npm` and `<prefix>/bin/node` exist and are executable. npm
-//     is taken from there — the node that owns the package — and never looked
-//     up on PATH. Under fnm that is `…/node-versions/<v>/installation/bin/npm`,
+//   - One npm is chosen, by absolute path, and every npm step below runs that
+//     path; nothing looks npm up a second time.
+//   - When anything exists at `<prefix>/bin/npm`, that is the npm, and it and
+//     `<prefix>/bin/node` must be executable files — the node that owns the
+//     package. Under fnm that is `…/node-versions/<v>/installation/bin/npm`,
 //     which exists even when the per-shell `fnm_multishells` directory does
-//     not.
-//   - That npm, run with `<prefix>/bin` first on PATH and otherwise the
+//     not. `<prefix>/bin` goes first on the child's PATH.
+//   - Only when nothing exists there — a system node with a user-level prefix
+//     set in .npmrc, the usual way to install globally without sudo — is npm
+//     looked up on the PATH the child will run with ([WithEnv]'s PATH if set,
+//     else this process's), skipping relative entries. That npm must resolve,
+//     symlinks followed, to `bin/npm-cli.js` in a package named npm: a Volta,
+//     asdf, mise or corepack shim is refused, because a dispatcher can answer
+//     `prefix -g` from npm's config and still install somewhere else (Volta
+//     does). Its `#!` line must name node — `/usr/bin/env node`, resolved on
+//     that same PATH, or an absolute node — which must be an executable file;
+//     that node's directory goes first on the child's PATH, so the shebang
+//     reaches the node that was checked.
+//   - That npm, run with that directory first on PATH and otherwise the
 //     subprocess environment the install would run with (so .npmrc and
-//     npm_config_* count), reports a `npm prefix -g` whose
+//     npm_config_* count), exits cleanly and reports a `npm prefix -g` whose
 //     `lib/node_modules/@openai/codex` resolves to the same directory as the
 //     package root PATH runs.
+//   - For the PATH npm only, the install is run with `--prefix` set to the
+//     prefix `npm prefix -g` reported. A prefix npm derives from the node it
+//     runs under would otherwise follow a node version switch made between
+//     the proof and the install; npm derives its global npmrc from the prefix
+//     too, so the pin changes nothing else.
 //
 // A mismatch is the known failure mode — a second copy whose visibility
-// depends on PATH order — and is refused as manual, not attempted.
+// depends on PATH order — and is refused as manual, not attempted. So is an
+// npm whose prefix holds no CLI package, and a prefix npm prints redacted (npm
+// shows a UUID-shaped path segment as "***", which resolves to nothing).
+//
+// Whichever npm runs, the writes it is checked for are the owning prefix's:
+// `<prefix>/lib/node_modules` and `<prefix>/bin`, never the directory npm
+// itself lives in.
 //
 // # Which binary is executed
 //
@@ -324,7 +350,7 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 // Afterwards the version is re-read, because the exit code cannot be trusted;
 // see [UpdateResult]. On failure the result is returned alongside the error,
 // because a half-run update still has before/after numbers worth rendering.
-// For npm the version to install is resolved first with the prefix's own
+// For npm the version to install is resolved first with the proven npm's
 // `npm view @openai/codex@latest version` and pinned: when it equals the
 // installed version nothing runs, and after a clean npm exit the PATH entry
 // must report exactly that version, or the run is [ErrUpdateFailed].
@@ -381,9 +407,9 @@ type updateEnv struct {
 	// `codex` symlink, which it rewrites on every run.
 	binDir string
 
-	// npmLatest runs `<npm> view @openai/codex@latest version` with binDir
+	// npmLatest runs `<npm> view @openai/codex@latest version` with pathDir
 	// first on PATH, so the registry npm is configured for answers.
-	npmLatest func(ctx context.Context, npm, binDir string) (string, error)
+	npmLatest func(ctx context.Context, npm, pathDir string) (string, error)
 
 	runUpdate func(ctx context.Context, run updaterRun, onLine func(string)) (int, error)
 }
@@ -400,8 +426,8 @@ func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) u
 	return updateEnv{
 		installEnv: osInstallEnv(codexHome).withChildEnv(childEnv, workDir),
 		binDir:     standaloneBinDir(childEnv),
-		npmLatest: func(ctx context.Context, npm, binDir string) (string, error) {
-			return runNPMLatest(ctx, npm, binDir, childEnv, workDir)
+		npmLatest: func(ctx context.Context, npm, pathDir string) (string, error) {
+			return runNPMLatest(ctx, npm, pathDir, childEnv, workDir)
 		},
 		runUpdate: func(ctx context.Context, run updaterRun, onLine func(string)) (int, error) {
 			overrides := childEnv
@@ -439,7 +465,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd, Reason: err.Error()}
 		}
 		npm = plan
-		run = updaterRun{name: plan.npm, pathDir: plan.binDir}
+		run = updaterRun{name: plan.npm, pathDir: plan.pathDir}
 		targets = plan.targets
 	default:
 		return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd}
@@ -496,7 +522,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 	var want string
 	if npm != nil {
 		onLine("Resolving " + CLIPackageName + "@latest")
-		latest, err := env.npmLatest(ctx, npm.npm, npm.binDir)
+		latest, err := env.npmLatest(ctx, npm.npm, npm.pathDir)
 		if err == nil && latest == "" {
 			err = errors.New("npm reported no version")
 		}
@@ -518,7 +544,11 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			return result, nil
 		}
 		want = latest
-		run.args = []string{"install", "--global", CLIPackageName + "@" + latest}
+		run.args = []string{"install", "--global"}
+		if npm.pinPrefix != "" {
+			run.args = append(run.args, "--prefix", npm.pinPrefix)
+		}
+		run.args = append(run.args, CLIPackageName+"@"+latest)
 		onLine(fmt.Sprintf("Installing %s@%s into %s", CLIPackageName, latest, npm.prefix))
 	}
 
