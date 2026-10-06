@@ -55,12 +55,15 @@ func setPlatformAttrs(cmd *exec.Cmd) *platformProc {
 	return p
 }
 
-// setUpdateCancel configures cancellation for the `codex update` spawn.
-// Windows cannot deliver a console interrupt from a windowless parent
-// (GenerateConsoleCtrlEvent only reaches processes on the caller's own
-// console), so cancellation is an immediate tree kill via the job object:
-// no grace period for the installer to unwind its staged download, but no
-// orphaned children either.
+// setUpdateCancel configures cancellation for an updater spawn (`codex
+// update`, or npm.cmd). Windows cannot deliver a console interrupt from a
+// windowless parent (GenerateConsoleCtrlEvent only reaches processes on the
+// caller's own console), so cancellation is an immediate tree kill via the
+// job object: no grace period for the installer to unwind its staged
+// download, but no orphaned children either. Because a kill mid-reify breaks
+// an npm install, `npm install -g` runs under a context the caller's
+// cancellation does not reach (see updaterRun.finishOnCancel), and this kill
+// fires only at its hard limit.
 func setUpdateCancel(cmd *exec.Cmd) *platformProc {
 	hideConsoleWindow(cmd)
 	p := &platformProc{job: newKillOnCloseJob()}

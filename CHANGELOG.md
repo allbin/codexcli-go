@@ -15,6 +15,51 @@ or pin a specific version (e.g. `@v0.11.0`).
 
 ## [Unreleased]
 
+`Update` acts for an npm-global install on Windows. The layout, the proof,
+locked files and cancellation were verified on Windows 11 (node 24.20.0,
+npm 11.6.0, codex 0.159.0 → 0.160.1) against the real install, read-only,
+and throwaway prefixes, three runs each.
+
+### Added
+
+- **Windows npm-global installs are self-managed when proven.** The `.cmd`
+  shim on PATH must run `%dp0%\node_modules\@openai\codex` beside it; npm is
+  resolved once to an absolute path from the child's PATH, as 0.11.0's
+  fallback does (normally `C:\Program Files\nodejs\npm.cmd`, else an
+  `npm.cmd` in the prefix), and must be npm's own `npm.cmd` — running
+  `node_modules\npm\bin\npm-cli.js` beside it — so Volta's `npm.exe` is
+  refused; that npm's `prefix -g` must be the shim's directory, holding the package
+  root the shim runs — compared after resolving symlinks and 8.3 names, as
+  exact paths and with `os.SameFile`. Anything else stays manual with the
+  reason named. `InstallInfo.SelfManaged` and `Update` share the verdict,
+  writability of `<prefix>\node_modules` and `<prefix>` included. A prefix
+  under a junction, or whose path has a UUID-shaped segment (npm 11 prints
+  those as `***`), does not resolve and is refused. The install carries
+  `--prefix <reported>`, as 0.11.0's PATH npm does: nvm-windows derives
+  the prefix from the node directory it repoints on a switch.
+- **`ErrUpdateInUse` / `UpdateInUseError`.** On Windows, immediately before
+  npm starts, every file in the package tree and the codex shims is probed;
+  one held by another process — a running codex.exe — refuses the update
+  with nothing installed. Without it npm renames the tree aside under the
+  running binary, installs the new version, exits 0 and leaves the old tree
+  behind as `node_modules\@openai\.codex-<hash>`. `SelfManaged` does not
+  account for it: it clears when the process exits.
+- `TestLive_NPMUpdateWindowsThrowaway` (integration, opt-in with
+  `CODEXCLI_LIVE_NPM_THROWAWAY`): mismatch refused, running codex blocked,
+  update to latest with no second copy and nothing left behind.
+
+### Changed
+
+- **A started Windows `npm install -g` is not killed when `Update`'s context
+  is cancelled.** A job-object kill a few seconds in left no `codex.cmd` on
+  PATH and a half-extracted package, because npm retires the old tree and
+  shims before downloading the new one and only rolls back on a signal
+  Windows cannot deliver. `Update` waits for npm and reports what it did,
+  bounded at ten minutes from start. A cancellation before npm starts still
+  stops there. Unix is unchanged.
+- `withPathPrefix` replaces a `Path` override case-insensitively on Windows
+  instead of adding a second PATH beside it.
+
 ## [0.11.0] - 2026-10-06
 
 `Update` acts for an npm-global install that a system npm writes through a

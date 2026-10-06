@@ -15,6 +15,11 @@ package codexcli
 // the npm on PATH, and needs CODEXCLI_LIVE_NPM_SCRATCH=1 (it downloads it).
 // Point CODEXCLI_LIVE_NPM_SCRATCH_DIR at a directory with no UUID in its path
 // if TMPDIR has one; see the test.
+//
+// TestLive_NPMUpdateWindowsThrowaway does the same for the Windows layout,
+// with a running codex as well. It needs CODEXCLI_LIVE_NPM_THROWAWAY set to a
+// base directory whose path has no UUID-shaped segment (a sandboxed TEMP
+// often has one).
 
 import (
 	"context"
@@ -23,8 +28,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func liveNPMInstall(t *testing.T) *InstallInfo {
@@ -93,6 +101,9 @@ func TestLive_NPMUpdateRuns(t *testing.T) {
 func TestLive_NPMUpdateThrowawayPrefix(t *testing.T) {
 	if os.Getenv("CODEXCLI_LIVE_NPM_SCRATCH") != "1" {
 		t.Skip("set CODEXCLI_LIVE_NPM_SCRATCH=1 to install @openai/codex into a temp prefix")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("unix prefix layout; see TestLive_NPMUpdateWindowsThrowaway")
 	}
 	npm, err := exec.LookPath("npm")
 	if err != nil {
@@ -238,4 +249,108 @@ func packageVersion(t *testing.T, pkg string) string {
 		t.Fatal(err)
 	}
 	return v.Version
+}
+
+// TestLive_NPMUpdateWindowsThrowaway: on a throwaway prefix first on PATH, a
+// mismatched npm prefix is refused, a running codex blocks, and with both out
+// of the way the update lands exactly the latest version with no second copy
+// and nothing left behind.
+func TestLive_NPMUpdateWindowsThrowaway(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows layout only")
+	}
+	base := os.Getenv("CODEXCLI_LIVE_NPM_THROWAWAY")
+	if base == "" {
+		t.Skip("set CODEXCLI_LIVE_NPM_THROWAWAY to a base directory for throwaway npm prefixes")
+	}
+	newDir := func(pattern string) string {
+		dir, err := os.MkdirTemp(base, pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		return dir
+	}
+	prefix, other := newDir("cxu"), newDir("cxo")
+	ctx := context.Background()
+
+	npm := func(prefix string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("npm", args...)
+		cmd.Env = append(os.Environ(), "npm_config_prefix="+prefix)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("npm %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	latest := npm(prefix, "view", CLIPackageName+"@latest", "version")
+	var versions []string
+	if err := json.Unmarshal([]byte(npm(prefix, "view", CLIPackageName, "versions", "--json")), &versions); err != nil {
+		t.Fatal(err)
+	}
+	release := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	older := ""
+	for _, v := range versions {
+		if release.MatchString(v) && v != latest {
+			older = v
+		}
+		if v == latest {
+			break
+		}
+	}
+	if older == "" {
+		t.Skipf("no release older than %s", latest)
+	}
+	npm(prefix, "install", "-g", CLIPackageName+"@"+older)
+	t.Setenv("PATH", prefix+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Logf("prefix %s holds %s; latest is %s", prefix, older, latest)
+
+	// npm configured for another prefix: installing would create a second copy.
+	mismatched := New(WithEnv(map[string]string{"npm_config_prefix": other}))
+	if info, err := mismatched.DetectInstall(ctx); err != nil || info.SelfManaged {
+		t.Fatalf("mismatched prefix: info %+v, err %v; want detected and not self-managed", info, err)
+	}
+	if _, err := mismatched.Update(ctx); !errors.Is(err, ErrManualUpdate) {
+		t.Fatalf("mismatched prefix: err = %v, want ErrManualUpdate", err)
+	}
+
+	client := New(WithEnv(map[string]string{"npm_config_prefix": prefix}))
+	info, err := client.DetectInstall(ctx)
+	if err != nil || !info.SelfManaged || info.Version != older {
+		t.Fatalf("own prefix: info %+v, err %v; want self-managed at %s", info, err, older)
+	}
+
+	// A running codex holds its vendored codex.exe.
+	running := exec.Command("node", filepath.Join(prefix, "node_modules", "@openai", "codex", "bin", "codex.js"), "app-server")
+	stdin, err := running.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := running.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * time.Second)
+	_, err = client.Update(ctx)
+	_ = stdin.Close()
+	_ = running.Process.Kill()
+	_ = running.Wait()
+	if !errors.Is(err, ErrUpdateInUse) {
+		t.Fatalf("with codex running: err = %v, want ErrUpdateInUse", err)
+	}
+	time.Sleep(time.Second) // the codex.exe child outlives node by a moment
+
+	result, err := client.Update(ctx, WithUpdateProgress(func(line string) { t.Log(line) }))
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !result.Changed || result.VersionBefore != older || result.VersionAfter != latest {
+		t.Errorf("result %s → %s changed=%v, want %s → %s", result.VersionBefore, result.VersionAfter, result.Changed, older, latest)
+	}
+	if left, _ := filepath.Glob(filepath.Join(prefix, "node_modules", "@openai", ".codex-*")); len(left) > 0 {
+		t.Errorf("npm left %v behind", left)
+	}
+	if entries, _ := os.ReadDir(other); len(entries) > 0 {
+		t.Errorf("the mismatched prefix %s was written to", other)
+	}
 }

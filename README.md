@@ -352,6 +352,8 @@ case errors.As(err, &manual):
     // manual.Command is verbatim and may be empty — never fill it in.
 case errors.Is(err, codexcli.ErrUpdateNotWritable):
     // Cannot, as opposed to tried and failed: don't offer the button at all.
+case errors.Is(err, codexcli.ErrUpdateInUse):
+    // Windows: a running codex holds the install. Nothing ran; close it and retry.
 case err != nil:
     // res is still non-nil here: a half-run update has numbers worth showing.
 }
@@ -360,15 +362,23 @@ if res != nil && res.Changed {
 }
 ```
 
-Four things it deliberately will not get wrong:
+What it deliberately will not get wrong:
 
-- **The standalone install, and an npm install whose prefix is proven.** Everything else (pnpm, bun, Homebrew, version-manager roots, unknown binaries, and any npm install the proof refuses) comes back as `*ManualUpdateError` carrying `InstallInfo.UpdateCmd` verbatim. `codex update` shells out to whatever `npm` is on `PATH`, and codex reports `managed package root` and `npm update target` as separate facts because they can differ. When they do, that "update" writes a second copy whose visibility depends on `PATH` order. So for npm this package picks one npm by absolute path and only runs it when that npm's `npm prefix -g`, under the environment the install runs with, holds the same package root the `PATH` entry resolves into. The npm is `<prefix>/bin/npm`, beside the node that owns `lib/node_modules/@openai/codex`, whenever it exists. When it does not (a system node with `prefix=~/.local` in `.npmrc`), it is the first `npm` on the subprocess `PATH`, accepted only if it resolves to npm's own `bin/npm-cli.js` (a Volta, asdf, mise or corepack shim is refused, since a dispatcher can report one prefix and install into another) and its `#!` line reaches an executable node, whose directory then goes first on the child's `PATH`; that npm installs with `--prefix` pinned to the prefix it reported. It then pins `npm view @openai/codex@latest version`, installs that exact version, and requires the `PATH` entry to report it afterwards. `ManualUpdateError.Reason` names the step that refused.
-- **`InstallInfo.SelfManaged` is the same verdict.** `Client.DetectInstall` sets it from the check `Update` makes, including write access to the npm prefix's `lib/node_modules` and `bin`, so a consumer can show an Update button exactly where `Update` will act. For npm-global installs detection therefore costs one `npm prefix -g` run.
+- **The standalone install, and an npm install whose prefix is proven.** Everything else (pnpm, bun, Homebrew, version-manager roots, unknown binaries, and any npm install the proof refuses) comes back as `*ManualUpdateError` carrying `InstallInfo.UpdateCmd` verbatim. `codex update` shells out to whatever `npm` is on `PATH`, and codex reports `managed package root` and `npm update target` as separate facts because they can differ. When they do, that "update" writes a second copy whose visibility depends on `PATH` order. So for npm this package picks one npm by absolute path and only runs it when that npm's `npm prefix -g`, under the environment the install runs with, holds the same package root the `PATH` entry resolves into. The npm is `<prefix>/bin/npm`, beside the node that owns `lib/node_modules/@openai/codex`, whenever it exists. When it does not (a system node with `prefix=~/.local` in `.npmrc`), it is the first `npm` on the subprocess `PATH`, accepted only if it resolves to npm's own `bin/npm-cli.js` (a Volta, asdf, mise or corepack shim is refused, since a dispatcher can report one prefix and install into another) and its `#!` line reaches an executable node, whose directory then goes first on the child's `PATH`; that npm installs with `--prefix` pinned to the prefix it reported. On Windows, where the prefix (`%APPDATA%\npm`) holds `codex.cmd` beside `node_modules\@openai\codex` and npm lives beside `node.exe`, npm is always found that second way, once, on the subprocess `PATH`, and must be npm's own `npm.cmd` (a batch file running `node_modules\npm\bin\npm-cli.js` beside it; Volta's `npm.exe` is refused); its `prefix -g` must be the very directory holding the `codex.cmd` on `PATH`, with the package root that shim runs inside it, compared after resolving symlinks and 8.3 names, as exact paths and as the same file system object, and it too installs with `--prefix` pinned. It then pins `npm view @openai/codex@latest version`, installs that exact version, and requires the `PATH` entry to report it afterwards. `ManualUpdateError.Reason` names the step that refused.
+- **`InstallInfo.SelfManaged` is the same verdict.** `Client.DetectInstall` sets it from the check `Update` makes, including write access to the directories npm writes (`lib/node_modules` and `bin` on unix, `node_modules` and the prefix on Windows), so a consumer can show an Update button exactly where `Update` will act. For npm-global installs detection therefore costs one `npm prefix -g` run.
+- **On Windows it will not update an install codex is running from.** npm renames the old package aside under a running `codex.exe`, installs the new one, exits 0, and leaves the old tree behind as `node_modules\@openai\.codex-<hash>`. So just before npm starts, every file in the package and the shims is opened for write and delete with full sharing; a sharing violation returns `ErrUpdateInUse` and nothing is installed. `SelfManaged` stays true meanwhile — it clears when the process exits.
+- **A started Windows npm install is not cancelled.** Killing it a few seconds in was observed to leave no `codex.cmd` on `PATH` and a half-extracted package (npm retires the old tree before downloading the new, and can only roll back on a signal Windows cannot send). A cancellation after npm starts is waited out, bounded at ten minutes.
 - **It executes the `PATH` entry** detection recorded — not the bare word `codex` (a second `exec.LookPath` can reach a different copy), and not the resolved path (that is the release the update is about to supersede).
 - **Success is verified by re-reading the version, never by the exit code.** `codex update` was observed exiting 0 and printing "Update ran successfully!" while the command it shells out to was not installed at all. Believe `Changed`, not `ExitCode`.
 - **A writability preflight runs first**, over the two directories the installer actually writes — `<CODEX_HOME>/packages/standalone/releases` and `$CODEX_INSTALL_DIR` (default `~/.local/bin`). Neither is necessarily the directory holding the binary on `PATH`.
 
-Verified end-to-end against codex 0.148.0 → 0.149.1 on a sandboxed `CODEX_HOME`: the real installer ran, the version moved, `Changed` came back true.
+Verified end-to-end against codex 0.148.0 → 0.149.1 on a sandboxed `CODEX_HOME`: the real installer ran, the version moved, `Changed` came back true. The Windows npm path was verified on Windows 11 (node 24.20.0, npm 11.6.0) against throwaway prefixes, 0.159.0/0.160.0 → 0.160.1: a mismatched prefix refused, a running codex blocked, an ACL-denied prefix not writable, and cancellations at 0.5–6 s leaving a working install. `TestLive_NPMUpdateWindowsThrowaway` repeats it:
+
+```
+CODEXCLI_LIVE_NPM_THROWAWAY=C:\Temp go test -tags integration -run TestLive_NPMUpdateWindowsThrowaway -count=1 -v .
+```
+
+The base directory must not contain a UUID-shaped path segment: npm 11 prints those as `***`, and a prefix it reports that way does not resolve, so it is refused.
 
 ## Per-thread MCP servers
 
@@ -579,6 +589,8 @@ through unchanged and you reconstruct output from `ContentDeltaEvent`
 | `published.go` | `LatestPublished` — the published version for an install's own release stream, in one HTTP request. Three-state verdict; never compares across streams. |
 | `update.go` | `Update` — runs codex's own updater for a standalone install, the proven npm for a proven npm install, refuses the rest with the command to display, and verifies by re-reading the version. |
 | `npm_update.go` | The npm-global proof: the prefix's own npm or, when it has none, a verified npm from the subprocess `PATH`, its `npm prefix -g` matched against the package root `PATH` runs, and the `SelfManaged` verdict shared with detection. |
+| `npm_update_winlayout.go` | The same proof for a Windows global prefix: the `.cmd` shim's package, npm resolved once from the child's `PATH`, prefix and package root matched by resolved path and file identity. |
+| `inuse_windows.go` | The Windows preflight that refuses an npm update while a file in the install is held by a running process. |
 | `mcp.go` | `Conn.ListMcpServerStatus` / `Conn.ListMcpServerStatusPage` (live RPC). Per-thread MCP servers are configured with `WithThreadConfig`. |
 | `skills.go` | `Conn.ListSkills` / `Conn.SetSkillEnabled*` / `Conn.SetSkillsExtraRoots` (live RPCs) and the `SkillInput(meta)` convenience. |
 | `schema/` | Hand-written Go types mirroring the JSON Schema surface: `types.go` (core), `notifications.go` (server notification payloads), `approvals.go`, `skills.go`, `model.go`, `mcp.go`. See [Updating the protocol](#updating-the-protocol) for why these are hand-written. |
@@ -680,12 +692,15 @@ Three changes need consumer action; the rest are additive.
   directly; os/exec refuses to start batch files with arguments cmd.exe
   cannot safely escape (the CVE-2024-24576 hardening). Falls back to running
   the shim when node is missing or the layout is unconfirmed.
-- **Cancelling `Update` kills without grace** — unix cancellation sends
-  SIGINT to the updater's process group so a staged download can be unwound
-  before the kill lands; Windows has no console interrupt deliverable from a
-  windowless parent, so cancellation there is an immediate job-object tree
-  kill. A cancelled Windows update may leave a staged partial download for
-  the installer to clean up on its next run.
+- **Cancelling `Update` kills without grace, or not at all** — unix
+  cancellation sends SIGINT to the updater's process group so a staged
+  download can be unwound before the kill lands; Windows has no console
+  interrupt deliverable from a windowless parent, so cancellation there is an
+  immediate job-object tree kill. A cancelled standalone update may leave a
+  staged partial download for the installer to clean up on its next run. A
+  started `npm install -g` is not killed on cancellation, because that was
+  observed to break the install; it runs to completion, bounded at ten
+  minutes. The process calling `Update` exiting mid-install still kills it.
 - **An external kill reads as a crash** — there are no signals, so a codex
   terminated from outside (Task Manager, `taskkill`) exits with a plain code
   and `ProcessExitError.Reason` reports `crashed`, not `killed`.

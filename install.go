@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -125,6 +126,10 @@ type InstallInfo struct {
 	// writable by this process. It comes from the same check Update makes, so
 	// a consumer can key an "Update" button on it. See [Update] for the proof.
 	//
+	// It does not say whether the install is in use right now: on Windows a
+	// running codex makes Update answer [ErrUpdateInUse] while SelfManaged
+	// stays true, because that clears when the process exits.
+	//
 	// Only [Client.DetectInstall] sets it. It costs an `npm prefix -g` run
 	// (a node startup, no network) for npm-global installs only.
 	SelfManaged bool
@@ -222,11 +227,12 @@ var defaultInstallClient = New()
 // filepath.EvalSymlinks, reads package metadata next to the resolved path,
 // resolves codex's standalone-install symlink under CODEX_HOME, and runs
 // `codex --version`. For an npm-global install it also runs `npm prefix -g`
-// with the npm [Update] would run, and creates and removes a probe file in the
-// npm prefix, to decide InstallInfo.SelfManaged. It starts no session, leaves
-// nothing behind, and makes no network calls. Notably it does not shell out to
-// `codex doctor`, which reports a superset of these facts but spends ~400ms of
-// network to do it — see [Doctor] if you want that report and can pay for it.
+// with the npm [Update] would run, and creates and removes a probe file in
+// each directory the update writes, to decide InstallInfo.SelfManaged. It
+// starts no session, leaves nothing behind, and makes no network calls.
+// Notably it does not shell out to `codex doctor`, which reports a superset of
+// these facts but spends ~400ms of network to do it — see [Doctor] if you want
+// that report and can pay for it.
 //
 // Fetching the *published* version (via `npm view`, the GitHub releases API,
 // or anything else) is the caller's business — this reports only what is
@@ -272,10 +278,14 @@ var defaultInstallClient = New()
 //
 // # Windows
 //
-// Windows classification has not been verified on real hardware. npm's
-// `node_modules` layout is handled, but a `.cmd`, `.bat`, or `.ps1` shim is
-// not a symlink and cannot be resolved further, so unless a sibling npm layout
-// confirms the install it is reported as InstallUnknown rather than guessed at.
+// A `.cmd`, `.bat`, or `.ps1` shim is not a symlink and cannot be resolved
+// further, so RealPath stays the shim, and unless a sibling npm layout
+// confirms the install it is reported as InstallUnknown rather than guessed
+// at. The global npm layout — `codex.cmd` beside `node_modules\@openai\codex`
+// in `%APPDATA%\npm` — was verified on Windows 11 with npm 11.6.0 and codex
+// 0.159.0 to classify as InstallNPMGlobal from package metadata. Other
+// Windows layouts (pnpm, bun, winget, version managers) are classified from
+// path evidence that has not been checked on real hardware.
 //
 // A missing CLI is not a failure: the returned error satisfies
 // errors.Is(err, ErrCLINotFound) and carries no other meaning.
@@ -333,8 +343,23 @@ type installEnv struct {
 	// lookup sees what the install will.
 	childPath string
 
+	// childPathExt is the PATHEXT that lookup on Windows tries extensions
+	// from, taken the same way. See windowsNPM.
+	childPathExt string
+
 	// writable reports whether this process could write into dir.
 	writable func(dir string) error
+
+	// goos selects which npm update proof applies; "" means runtime.GOOS.
+	// Tests set it to drive the Windows proof on any OS.
+	goos string
+}
+
+func (e installEnv) os() string {
+	if e.goos != "" {
+		return e.goos
+	}
+	return runtime.GOOS
 }
 
 func osInstallEnv(codexHomeOverride string) installEnv {
@@ -353,21 +378,25 @@ func osInstallEnv(codexHomeOverride string) installEnv {
 		npmPrefix: func(ctx context.Context, npm, pathDir string) (string, error) {
 			return runNPMPrefix(ctx, npm, pathDir, nil, "")
 		},
-		childPath: os.Getenv("PATH"),
-		writable:  checkWritable,
+		childPath:    os.Getenv("PATH"),
+		childPathExt: os.Getenv("PATHEXT"),
+		writable:     checkWritable,
 	}
 }
 
 // withChildEnv returns env with the npm prefix probe run, and npm looked up,
 // under the subprocess overrides ([WithEnv], [WithWorkDir]) — the environment
 // an npm update would run under, and so the one whose npm config decides where
-// it writes.
+// it writes. On Windows an override spelled "Path" counts, as it does there.
 func (e installEnv) withChildEnv(overrides map[string]string, workDir string) installEnv {
 	e.npmPrefix = func(ctx context.Context, npm, pathDir string) (string, error) {
 		return runNPMPrefix(ctx, npm, pathDir, overrides, workDir)
 	}
-	if p, ok := overrides["PATH"]; ok {
-		e.childPath = p
+	if k, ok := envKey(overrides, "PATH"); ok {
+		e.childPath = overrides[k]
+	}
+	if k, ok := envKey(overrides, "PATHEXT"); ok {
+		e.childPathExt = overrides[k]
 	}
 	return e
 }

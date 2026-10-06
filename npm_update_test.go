@@ -591,6 +591,7 @@ func TestNPMUpdate_LooksUpNPMOnTheChildPATH(t *testing.T) {
 }
 
 func TestShebangNode(t *testing.T) {
+	skipUnixFallbackOnWindows(t)
 	dir := t.TempDir()
 	node := filepath.Join(dir, "node")
 	mustWrite(t, node, "", 0o755)
@@ -617,7 +618,18 @@ func TestShebangNode(t *testing.T) {
 	}
 }
 
+// skipUnixFallbackOnWindows skips tests of the unix PATH-npm fallback's
+// helpers, which rely on exec bits and `#!` lines. Windows has its own npm
+// lookup (windowsNPM) and never calls them.
+func skipUnixFallbackOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix fallback helper; Windows uses windowsNPM")
+	}
+}
+
 func TestLookPathInSkipsRelativeEntries(t *testing.T) {
+	skipUnixFallbackOnWindows(t)
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "npm"), "", 0o755)
 	wd, err := os.Getwd()

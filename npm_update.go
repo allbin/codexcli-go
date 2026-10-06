@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -24,27 +23,40 @@ type npmUpdatePlan struct {
 	prefix string
 
 	// npm is the absolute path every npm step runs: `<prefix>/bin/npm` when
-	// the prefix has one, else the npm found once on the child's PATH. It is
-	// never looked up again between the proof and the install.
+	// the prefix has one, else the npm found once on the child's PATH — on
+	// Windows always the latter (see windowsNPM), since npm does not live in
+	// a Windows prefix. It is never looked up again between the proof and the
+	// install.
 	npm string
 
 	// pathDir goes first on the child's PATH for every npm step, so npm's
 	// `#!/usr/bin/env node` reaches the node the proof checked rather than
 	// whatever a service's PATH would find, or nothing. It is `<prefix>/bin`
 	// when the prefix has its own npm, else the directory of the node the
-	// fallback npm runs under.
+	// fallback npm runs under. On Windows it is npm.cmd's own directory, whose
+	// node.exe that npm.cmd runs.
 	pathDir string
 
 	// pinPrefix, when set, is passed to `npm install -g` as --prefix: the
 	// prefix `npm prefix -g` reported, so the install lands where the proof
-	// looked even if something it derives from moves in between. Set only for
-	// the PATH fallback; see proveNPMUpdate.
+	// looked even if something it derives from moves in between. Set for the
+	// PATH fallback and on Windows; see proveNPMUpdate.
 	pinPrefix string
 
 	// targets are the directories `npm install -g` writes: the package tree
-	// under lib/node_modules and the bin link it rewrites. Both are under
+	// (`<prefix>/lib/node_modules`, or `<prefix>\node_modules` on Windows) and
+	// the directory whose bin links or shims it rewrites. Both are under
 	// prefix, never under the directory npm itself sits in.
 	targets []string
+
+	// inUse are the files and trees npm replaces that must not be held open by
+	// another process when it starts — Windows only, nil on unix. See
+	// firstFileInUse.
+	inUse []string
+
+	// finishOnCancel lets a started `npm install -g` run to completion when
+	// the caller cancels — Windows only. See updaterRun.finishOnCancel.
+	finishOnCancel bool
 }
 
 // errNPMUnproven is the reason an npm-global install stays manual. It never
@@ -75,15 +87,16 @@ func unproven(format string, args ...any) error {
 // system node, the usual way to avoid sudo — is npm looked up on the child's
 // PATH; see fallbackNPM for what that npm has to prove about itself.
 //
-// Only npm on unix is attempted. pnpm and bun keep their own global stores,
-// and a Windows prefix has neither the lib/ layout nor a verified shim path;
-// they stay manual until the same proof is written and checked for them.
+// Only npm is attempted. pnpm and bun keep their own global stores; they stay
+// manual until the same proof is written and checked for them. A Windows
+// prefix has neither the lib/ layout nor npm inside it, and is proven by
+// proveNPMUpdateWindows to the same standard.
 func proveNPMUpdate(ctx context.Context, info *InstallInfo, env installEnv) (*npmUpdatePlan, error) {
 	if info.Method != InstallNPMGlobal || info.PackageManager != "npm" {
 		return nil, unproven("%s install is not npm-global", info.Method)
 	}
-	if runtime.GOOS == "windows" {
-		return nil, unproven("npm prefix layout is not verified on windows")
+	if env.os() == "windows" {
+		return proveNPMUpdateWindows(ctx, info, env)
 	}
 	if env.npmPrefix == nil || env.evalSymlink == nil {
 		return nil, unproven("no npm prefix probe available")
@@ -322,20 +335,22 @@ func runNPMLatest(ctx context.Context, npm, pathDir string, overrides map[string
 
 // withPathPrefix returns overrides with dir placed first on PATH, without
 // mutating the caller's map. The base PATH is the override if one is set,
-// else this process's own.
+// else this process's own. On Windows an override spelled "Path" is the one
+// replaced, so the child does not get two PATHs.
 func withPathPrefix(overrides map[string]string, dir string) map[string]string {
 	merged := make(map[string]string, len(overrides)+1)
 	for k, v := range overrides {
 		merged[k] = v
 	}
-	base, ok := overrides["PATH"]
+	key, ok := envKey(overrides, "PATH")
 	if !ok {
-		base = os.Getenv("PATH")
+		key = "PATH"
 	}
+	base := envValue(overrides, "PATH")
 	if base == "" {
-		merged["PATH"] = dir
+		merged[key] = dir
 	} else {
-		merged["PATH"] = dir + string(os.PathListSeparator) + base
+		merged[key] = dir + string(os.PathListSeparator) + base
 	}
 	return merged
 }

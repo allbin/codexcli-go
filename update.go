@@ -102,6 +102,34 @@ func (e *UpdateNotWritableError) Is(target error) bool { return target == ErrUpd
 
 func (e *UpdateNotWritableError) Unwrap() error { return e.Err }
 
+// ErrUpdateInUse matches the error returned by [Update] when a file the
+// update would replace is held by another process — on Windows, a codex
+// running from the install being updated. Nothing was installed.
+//
+// It is the third preflight answer, distinct from both others: unlike
+// [ErrUpdateNotWritable] it is transient — the same call goes through once
+// the process exits, so the right response is "close codex and retry", not
+// hiding the button — and unlike [ErrUpdateFailed] nothing was attempted.
+// [InstallInfo.SelfManaged] does not account for it, for the same reason.
+var ErrUpdateInUse = errors.New("codexcli: update target is in use by a running process")
+
+// UpdateInUseError reports the file that blocked an update. See
+// [ErrUpdateInUse].
+type UpdateInUseError struct {
+	// Method is the detected install method.
+	Method InstallMethod
+
+	// Path is the held file: typically the vendored codex.exe of a running
+	// session, or one of the helper executables it starts.
+	Path string
+}
+
+func (e *UpdateInUseError) Error() string {
+	return fmt.Sprintf("codexcli: cannot update %s install while %s is in use by another process", e.Method, e.Path)
+}
+
+func (e *UpdateInUseError) Is(target error) bool { return target == ErrUpdateInUse }
+
 // ErrUpdateFailed matches the error returned by [Update] when the updater ran
 // and exited non-zero, could not be started at all, or — for an npm-global
 // install — exited 0 without the version moving while a newer one was asked
@@ -167,7 +195,8 @@ type UpdateResult struct {
 	// Updater is the executable that was run: Path for a standalone install,
 	// the proven npm for an npm-global one — `<prefix>/bin/npm`, or the npm
 	// found on the child's PATH when the prefix has none, as found (not
-	// resolved to npm-cli.js).
+	// resolved to npm-cli.js). On Windows always the latter, typically
+	// `C:\Program Files\nodejs\npm.cmd`.
 	Updater string
 
 	// VersionBefore is what the CLI reported for itself before the run, or ""
@@ -242,16 +271,18 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //
 //   - [InstallNative] — codex's own standalone installer layout under
 //     CODEX_HOME — by running `codex update`.
-//   - [InstallNPMGlobal] owned by npm, on unix, when the npm update target is
-//     proven to be the tree PATH runs (below) — by running that proven npm,
-//     by absolute path, as `npm install -g @openai/codex@<latest>`.
+//   - [InstallNPMGlobal] owned by npm, on unix or Windows, when the npm update
+//     target is proven to be the tree PATH runs (below) — by running that
+//     proven npm, by absolute path, as `npm install -g @openai/codex@<latest>`.
 //
 // Every other install is refused with a [ManualUpdateError] carrying
 // [InstallInfo.UpdateCmd] verbatim for the user to run: pnpm, bun, Homebrew,
 // winget, a version-manager root with no package metadata, an unknown binary,
 // and any npm install the proof does not hold for. That refusal is a normal
 // outcome, not a failure. [InstallInfo.SelfManaged] is computed by the same
-// check, so it is true exactly when this function does not refuse.
+// check, writability included, so it is true exactly when this function does
+// not refuse — except for [ErrUpdateInUse], which is transient and which
+// SelfManaged does not predict.
 //
 // # Why npm is not driven through `codex update`
 //
@@ -272,7 +303,7 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 // # The npm proof
 //
 // An npm-global install is updated only when all of this holds, and is manual
-// otherwise:
+// otherwise. On unix:
 //
 //   - The resolved binary sits under `<prefix>/lib/node_modules/@openai/codex`
 //     with a package.json naming the CLI.
@@ -305,14 +336,40 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 //     the proof and the install; npm derives its global npmrc from the prefix
 //     too, so the pin changes nothing else.
 //
+// On Windows, where a global prefix has no lib\ or bin\ and npm does not live
+// in it (verified on Windows 11, node 24.20.0, npm 11.6.0, codex 0.159.0):
+//
+//   - The PATH entry is an npm `.cmd` shim whose run line names
+//     `%dp0%\node_modules\@openai\codex\…` — the package beside it — and that
+//     directory holds a package.json naming the CLI. The shim's directory is
+//     the prefix, and is also where npm writes the shims.
+//   - npm is resolved once, to an absolute path, as the unix fallback does: the
+//     first `npm` with a PATHEXT extension on the PATH the install will run
+//     with (a "Path" override counts), normally the npm.cmd beside node.exe,
+//     else an npm.cmd in the prefix itself. It must be npm's own npm.cmd —
+//     a batch file running `node_modules\npm\bin\npm-cli.js` beside it, in a
+//     package named npm — so Volta's npm.exe, which would intercept the
+//     install, is refused. That one file runs `prefix -g`, `view` and
+//     `install -g`, with its own directory first on PATH so the node.exe
+//     beside it is the node npm uses.
+//   - That npm, under the subprocess environment, reports a `prefix -g` that
+//     is the shim's directory, and whose `node_modules\@openai\codex` is the
+//     package root the shim runs. Both are compared after resolving symlinks
+//     and 8.3 short names, as exact paths and as the same file system object
+//     ([os.SameFile]). A prefix reached through a junction does not resolve
+//     and is refused.
+//   - The install is run with `--prefix` set to the reported prefix, as for
+//     the unix PATH npm: nvm-windows derives the prefix from the node
+//     directory and switches node by repointing it.
+//
 // A mismatch is the known failure mode — a second copy whose visibility
 // depends on PATH order — and is refused as manual, not attempted. So is an
 // npm whose prefix holds no CLI package, and a prefix npm prints redacted (npm
 // shows a UUID-shaped path segment as "***", which resolves to nothing).
 //
 // Whichever npm runs, the writes it is checked for are the owning prefix's:
-// `<prefix>/lib/node_modules` and `<prefix>/bin`, never the directory npm
-// itself lives in.
+// `<prefix>/lib/node_modules` and `<prefix>/bin`, or `<prefix>\node_modules`
+// and the prefix on Windows — never the directory npm itself lives in.
 //
 // # Which binary is executed
 //
@@ -343,26 +400,58 @@ func WithUpdateTimeout(d time.Duration) UpdateOption {
 // rewrites the visible symlink in `$CODEX_INSTALL_DIR` (default
 // `~/.local/bin`) on every run, whichever directory PATH actually reaches the
 // CLI through. For npm they are `<prefix>/lib/node_modules` and the
-// `<prefix>/bin` link directory. (An unwritable npm prefix makes
-// [InstallInfo.SelfManaged] false, so a consumer keying on it shows the
+// `<prefix>/bin` link directory on unix, and `<prefix>\node_modules` and the
+// prefix itself, which holds the shims, on Windows. (An unwritable npm prefix
+// makes [InstallInfo.SelfManaged] false, so a consumer keying on it shows the
 // command instead.)
 //
-// Afterwards the version is re-read, because the exit code cannot be trusted;
-// see [UpdateResult]. On failure the result is returned alongside the error,
-// because a half-run update still has before/after numbers worth rendering.
-// For npm the version to install is resolved first with the proven npm's
-// `npm view @openai/codex@latest version` and pinned: when it equals the
-// installed version nothing runs, and after a clean npm exit the PATH entry
-// must report exactly that version, or the run is [ErrUpdateFailed].
+// On Windows one more check runs, last, immediately before npm starts: no
+// file in the package tree or among the codex shims may be held by another
+// process, or the call returns [ErrUpdateInUse] and nothing is installed.
+// npm replaces a global package by renaming it aside, extracting the new
+// one, and deleting the old. Windows lets that rename happen under a running
+// codex.exe, so npm installs the new version, fails to delete the running
+// image, and exits 0 with the old tree left behind as
+// `node_modules\@openai\.codex-<hash>` — while the running codex resolves its
+// helper executables by a path that now holds the new version's. A file held
+// without delete sharing fails the rename instead, and npm rolls back. The
+// check runs after the version is resolved, so an install already at latest
+// answers that rather than "in use". A codex that starts in the moment
+// between the check and npm's rename (about two seconds of npm startup) is
+// the one case it cannot see: that update succeeds and is reported as such,
+// and npm's next run on the package removes the leftover tree.
+//
+// Afterwards the version is re-read through the PATH entry (the `.cmd` shim
+// on Windows), because the exit code cannot be trusted; see [UpdateResult].
+// On failure the result is returned alongside the error, because a half-run
+// update still has before/after numbers worth rendering. For npm the version
+// to install is resolved first with the proven npm's `npm view
+// @openai/codex@latest version` and pinned: when it equals the installed
+// version nothing runs, and after a clean npm exit the PATH entry must report
+// exactly that version, or the run is [ErrUpdateFailed].
 //
 // The caller's context deadline is honoured. Without one the run is bounded by
 // [WithUpdateTimeout], defaulting to ten minutes. On unix a cancelled run is
 // interrupted rather than killed outright — SIGINT to the updater's process
-// group — so the installer can unwind its staged download instead of leaving a
-// partial release tree behind. On Windows no interrupt is deliverable from a
-// windowless parent, so cancellation is an immediate tree kill via a job
-// object; a cancelled Windows update may leave a staged partial download for
-// the installer to clean up on its next run.
+// group — so the installer can unwind its staged download, and npm can roll
+// back, instead of leaving a partial tree behind. On Windows no interrupt is
+// deliverable from a windowless parent; the only stop is a tree kill via a
+// job object, so:
+//
+//   - A Windows `npm install -g`, once started, is not stopped by
+//     cancellation: Update waits for npm to exit and reports what it did,
+//     success included. Killing it was observed to leave the install broken —
+//     npm renames the old package and shims aside before it downloads the new
+//     one, so a kill a few seconds in left no codex.cmd on PATH and a
+//     half-extracted package. Its only bound is ten minutes from start, for an
+//     npm that has wedged; a kill there can leave that same state, which
+//     running [InstallInfo.UpdateCmd] repairs. The process calling Update
+//     exiting mid-install kills npm with it, with the same effect.
+//   - A cancellation before npm install starts — during detection or `npm
+//     view` — stops there, and nothing is installed.
+//   - A cancelled standalone `codex update` is killed immediately and may
+//     leave a staged partial download for the installer to clean up on its
+//     next run.
 func Update(ctx context.Context, opts ...UpdateOption) (*UpdateResult, error) {
 	return defaultInstallClient.Update(ctx, opts...)
 }
@@ -411,6 +500,10 @@ type updateEnv struct {
 	// first on PATH, so the registry npm is configured for answers.
 	npmLatest func(ctx context.Context, npm, pathDir string) (string, error)
 
+	// inUse reports the first of an npm plan's inUse paths another process
+	// holds; see firstFileInUse.
+	inUse func(paths []string) (string, error)
+
 	runUpdate func(ctx context.Context, run updaterRun, onLine func(string)) (int, error)
 }
 
@@ -420,7 +513,19 @@ type updaterRun struct {
 	name    string
 	args    []string
 	pathDir string
+
+	// finishOnCancel means a cancellation arriving after the updater started
+	// does not stop it: the run is bounded by uncancellableUpdateLimit alone,
+	// and Update reports whatever it did. A run not yet started when the
+	// context ends is not started.
+	finishOnCancel bool
 }
+
+// uncancellableUpdateLimit bounds an updater run that ignores cancellation
+// (a Windows `npm install -g`). It exists to stop a wedged npm holding the
+// caller forever; killing npm at this point can leave the install broken,
+// which is still better than never returning.
+const uncancellableUpdateLimit = defaultUpdateTimeout
 
 func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) updateEnv {
 	return updateEnv{
@@ -429,10 +534,19 @@ func osUpdateEnv(codexHome string, childEnv map[string]string, workDir string) u
 		npmLatest: func(ctx context.Context, npm, pathDir string) (string, error) {
 			return runNPMLatest(ctx, npm, pathDir, childEnv, workDir)
 		},
+		inUse: firstFileInUse,
 		runUpdate: func(ctx context.Context, run updaterRun, onLine func(string)) (int, error) {
 			overrides := childEnv
 			if run.pathDir != "" {
 				overrides = withPathPrefix(childEnv, run.pathDir)
+			}
+			if run.finishOnCancel {
+				if err := ctx.Err(); err != nil {
+					return -1, err
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), uncancellableUpdateLimit)
+				defer cancel()
 			}
 			return execUpdater(ctx, run.name, run.args, buildEnv(overrides), workDir, onLine)
 		},
@@ -465,7 +579,7 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd, Reason: err.Error()}
 		}
 		npm = plan
-		run = updaterRun{name: plan.npm, pathDir: plan.pathDir}
+		run = updaterRun{name: plan.npm, pathDir: plan.pathDir, finishOnCancel: plan.finishOnCancel}
 		targets = plan.targets
 	default:
 		return nil, &ManualUpdateError{Method: info.Method, Command: info.UpdateCmd}
@@ -544,6 +658,15 @@ func runUpdate(ctx context.Context, binary string, env updateEnv, opts []UpdateO
 			return result, nil
 		}
 		want = latest
+
+		// Checked last, right before npm starts, so an install already at
+		// latest answers that instead, and the window for a codex to start in
+		// between is as short as it can be made.
+		if len(npm.inUse) > 0 {
+			if err := checkNotInUse(info.Method, npm.inUse, env); err != nil {
+				return nil, err
+			}
+		}
 		run.args = []string{"install", "--global"}
 		if npm.pinPrefix != "" {
 			run.args = append(run.args, "--prefix", npm.pinPrefix)
@@ -595,6 +718,24 @@ func probeWritable(env installEnv, dir string) error {
 		return errors.New("no writability check available")
 	}
 	return env.writable(dir)
+}
+
+// checkNotInUse runs the environment's in-use probe over paths. A held file
+// is [ErrUpdateInUse]; a file that could not be probed is
+// [ErrUpdateNotWritable], since npm could not replace it either; and a
+// missing probe is a refusal, never a pass.
+func checkNotInUse(method InstallMethod, paths []string, env updateEnv) error {
+	if env.inUse == nil {
+		return &UpdateNotWritableError{Method: method, Err: errors.New("no in-use check available")}
+	}
+	held, err := env.inUse(paths)
+	if err != nil {
+		return &UpdateNotWritableError{Method: method, Dir: filepath.Dir(held), Err: err}
+	}
+	if held != "" {
+		return &UpdateInUseError{Method: method, Path: held}
+	}
+	return nil
 }
 
 // reprobeVersion re-reads the installed version after an update.
@@ -729,9 +870,12 @@ func nearestExistingDir(dir string) (string, error) {
 	return "", fmt.Errorf("no existing ancestor of %s could be found", dir)
 }
 
-// execUpdater runs an updater — `<codex> update` or `<prefix>/bin/npm install
-// --global …` — forwarding every output line to onLine as
-// it arrives.
+// execUpdater runs an updater — `<codex> update` or `<npm> install --global …`
+// — forwarding every output line to onLine as it arrives. On Windows npm is
+// npm.cmd: os/exec runs a batch file through cmd.exe and refuses arguments it
+// cannot quote safely, which the fixed `install --global @openai/codex@<v>`
+// never contains, and the hidden console set by setUpdateCancel is inherited
+// by cmd.exe and the node it starts, so nothing flashes on screen.
 //
 // On unix, cancellation interrupts rather than kills: the installer traps
 // INT/TERM to remove its staging directory, so SIGINT to the process group
