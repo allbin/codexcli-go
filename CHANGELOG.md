@@ -11,9 +11,14 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.10.0`).
+or pin a specific version (e.g. `@v0.11.0`).
 
 ## [Unreleased]
+
+## [0.11.0] - 2026-10-06
+
+`Update` acts for an npm-global install that a system npm writes through a
+user-level prefix, the usual no-sudo setup. Checked live on npm 11.19.0.
 
 ### Changed
 
@@ -36,6 +41,9 @@ or pin a specific version (e.g. `@v0.10.0`).
   a real update in a temp prefix moved 0.160.0 → 0.160.1 with no other
   prefix touched, while a client configured for another prefix was refused
   (three runs, `TestLive_NPMUpdateThrowawayPrefix`).
+- A prefix whose path holds a UUID-shaped segment stays manual, on either
+  npm: `npm prefix -g` prints that segment as `***`, so it resolves to
+  nothing. This was already so; `Update`'s doc now says it.
 
 ## [0.10.0] - 2026-10-02
 
@@ -691,7 +699,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/allbin/codexcli-go/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/allbin/codexcli-go/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/allbin/codexcli-go/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/allbin/codexcli-go/compare/v0.8.0...v0.8.1
