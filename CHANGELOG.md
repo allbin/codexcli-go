@@ -11,9 +11,11 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.11.0`).
+or pin a specific version (e.g. `@v0.12.0`).
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-10-06
 
 `Update` acts for an npm-global install on Windows. The layout, the proof,
 locked files and cancellation were verified on Windows 11 (node 24.20.0,
@@ -744,7 +746,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/allbin/codexcli-go/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/allbin/codexcli-go/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/allbin/codexcli-go/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/allbin/codexcli-go/compare/v0.8.1...v0.9.0
