@@ -11,9 +11,15 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.12.0`).
+or pin a specific version (e.g. `@v0.12.1`).
 
 ## [Unreleased]
+
+## [0.12.1] - 2026-10-07
+
+Cancelling `Update` on unix can no longer break an npm-global install.
+Reproduced and checked live through `Update` against throwaway installs on
+npm 11.19.0 / node 24, idle and under load.
 
 ### Fixed
 
@@ -789,7 +795,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/allbin/codexcli-go/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/allbin/codexcli-go/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/allbin/codexcli-go/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/allbin/codexcli-go/compare/v0.9.0...v0.10.0
