@@ -2,12 +2,12 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename/delete, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, account and sign-in (device code, browser, API key, logout), aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3, and `DeleteThread` (v0.10.0) against 0.160.0 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename/delete, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, account and sign-in (device code, browser, API key, logout), aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3, and `DeleteThread` (v0.10.0) against 0.160.0, and device-code sign-in (v0.13.0) against 0.160.1 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
 
 ## Install
 
 ```
-go get github.com/allbin/codexcli-go@v0.12.1
+go get github.com/allbin/codexcli-go@v0.13.0
 ```
 
 Pre-1.0, but tagged from v0.1.0 onward — pin a tag rather than a commit SHA. See the [CHANGELOG](CHANGELOG.md) and the [GitHub releases](https://github.com/allbin/codexcli-go/releases). v0.8.0 is retracted (it does not build); use v0.8.1 or later. Requires the `codex` CLI on `PATH` (or override via `WithBinaryPath`) and `codex login` completed once for OAuth.

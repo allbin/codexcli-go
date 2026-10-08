@@ -11,9 +11,15 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.12.1`).
+or pin a specific version (e.g. `@v0.13.0`).
 
 ## [Unreleased]
+
+## [0.13.0] - 2026-10-08
+
+Codex can be signed in from another device: device-code ChatGPT login,
+plus browser and API-key login and logout. Checked live against codex
+0.160.1.
 
 ### Added
 
@@ -28,8 +34,9 @@ or pin a specific version (e.g. `@v0.12.1`).
   ended). codex sends the same "Login was not completed" for a cancel and
   for a replacing start, before or after it answers the cancel; the outcome
   is held until the cancel's answer decides which. A start whose `ctx` ends
-  before codex answers cancels the attempt codex created. The attempt runs inside the app-server, so the process dying
-  ends the handle with the exit error. Checked live against codex 0.160.1
+  before codex answers cancels the attempt codex created. The attempt runs
+  inside the app-server, so the process dying ends the handle with the exit
+  error. Checked live against codex 0.160.1
   in a throwaway `CODEX_HOME`: a person completed a sign-in, after which
   `account/read` reported the ChatGPT account on the signing process, on
   one already running in the same home, and on a fresh one (one run).
@@ -824,7 +831,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/allbin/codexcli-go/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/allbin/codexcli-go/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/allbin/codexcli-go/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/allbin/codexcli-go/compare/v0.10.0...v0.11.0
