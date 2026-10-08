@@ -30,6 +30,8 @@ or pin a specific version (e.g. `@v0.12.1`).
   in a throwaway `CODEX_HOME`: a person completed a sign-in, after which
   `account/read` reported the ChatGPT account on the signing process, on
   one already running in the same home, and on a fresh one (one run).
+  An unanswered code ended 15m01s after the start with
+  `device auth timed out after 15 minutes` (one run).
 - `Conn.StartBrowserLogin` (`chatgpt`, returns `AuthURL`; only completes in
   a browser on the codex machine), `Conn.LoginWithAPIKey` and
   `Conn.Logout` (`account/logout`).

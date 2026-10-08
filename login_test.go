@@ -208,6 +208,30 @@ func TestLoginCancel_NotFound(t *testing.T) {
 	}
 }
 
+// TestLoginCancel_NotFoundBeforeOutcome: codex sends a replaced attempt's
+// outcome asynchronously, so a Cancel can get notFound before it arrives.
+// That outcome is the replacement's doing, not this Cancel's.
+func TestLoginCancel_NotFoundBeforeOutcome(t *testing.T) {
+	_, login, _ := connectWithDeviceLogin(t, nil, func(fix *BidiFixtureExecutor) accountHandlers {
+		return accountHandlers{
+			schema.MethodAccountLoginCancel: func(id, _ json.RawMessage) {
+				_ = fix.SendResponse(id, map[string]any{"status": "notFound"})
+				go func() {
+					time.Sleep(50 * time.Millisecond)
+					loginCompleted(fix, testLoginID, false, "Login was not completed")
+				}()
+			},
+		}
+	})
+	if err := login.Cancel(context.Background()); !errors.Is(err, ErrLoginNotFound) {
+		t.Fatalf("Cancel = %v, want ErrLoginNotFound", err)
+	}
+	err := waitLogin(t, login)
+	if !errors.Is(err, ErrLoginFailed) || errors.Is(err, ErrLoginCanceled) {
+		t.Fatalf("err = %v, want ErrLoginFailed, not ErrLoginCanceled", err)
+	}
+}
+
 // TestLoginWait_ContextEnds: ctx bounds the wait, not the sign-in.
 func TestLoginWait_ContextEnds(t *testing.T) {
 	var fixRef *BidiFixtureExecutor

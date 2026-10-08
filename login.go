@@ -106,6 +106,9 @@ func (l *Login) Cancel(ctx context.Context) error {
 		return l.conn.promoteRPCError(schema.MethodAccountLoginCancel, err)
 	}
 	if resp.Status != schema.CancelLoginCanceled {
+		// Not ours to stop: a "not completed" outcome still on its way
+		// came from a replacing start or a logout, not this Cancel.
+		l.canceled.Store(false)
 		return fmt.Errorf("%s %s: %w", schema.MethodAccountLoginCancel, l.ID, ErrLoginNotFound)
 	}
 	return nil
@@ -244,6 +247,9 @@ const loginNotCompletedMessage = "Login was not completed"
 // carrying codex's message when OpenAI will not issue a code (e.g. -32600
 // "device code login is not enabled for this Codex server. ...") or when
 // config forces API-key login ("ChatGPT login is disabled. ...").
+//
+// If ctx ends before codex answers, codex may have started an attempt no
+// handle tracks; it runs until its deadline or the next start replaces it.
 func (c *Conn) StartDeviceCodeLogin(ctx context.Context) (*Login, error) {
 	return c.startLogin(ctx, schema.LoginAccountParams{Type: schema.LoginTypeChatGPTDeviceCode}, deviceCodeLoginLifetime)
 }
