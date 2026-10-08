@@ -12,6 +12,22 @@ const (
 	// pull the current rate-limit snapshot on demand. Unlike the
 	// `account/rateLimits/updated` notification it does not need a thread.
 	MethodAccountRateLimitsRead = "account/rateLimits/read"
+	// MethodAccountLoginStart is the `account/login/start` request: begin a
+	// sign-in. For the ChatGPT flows it returns at once with a loginId; the
+	// outcome arrives later as `account/login/completed`.
+	MethodAccountLoginStart = "account/login/start"
+	// MethodAccountLoginCancel is the `account/login/cancel` request: stop
+	// the pending ChatGPT sign-in with the given loginId.
+	MethodAccountLoginCancel = "account/login/cancel"
+	// MethodAccountLogout is the `account/logout` request: remove the stored
+	// credentials and cancel any pending sign-in.
+	MethodAccountLogout = "account/logout"
+	// MethodAccountLoginCompleted is the `account/login/completed`
+	// notification: a sign-in started with `account/login/start` ended.
+	MethodAccountLoginCompleted = "account/login/completed"
+	// MethodAccountUpdated is the `account/updated` notification: the auth
+	// mode or plan changed (after a sign-in or a logout).
+	MethodAccountUpdated = "account/updated"
 )
 
 // AccountType discriminates the `account/read` reply. Unknown values are
@@ -87,4 +103,89 @@ type AccountRateLimitsReadResponse struct {
 	// credit shape is still moving between codex releases and no consumer
 	// needs it typed yet.
 	RateLimitResetCredits json.RawMessage `json:"rateLimitResetCredits,omitempty"`
+}
+
+// LoginType discriminates `account/login/start` params and its reply.
+// codex also defines chatgptAuthTokens ("OpenAI internal use only") and two
+// experimental Amazon Bedrock variants; they are not bound.
+type LoginType string
+
+const (
+	// LoginTypeAPIKey stores an OpenAI API key. The reply carries no
+	// loginId: the key is saved before the server answers.
+	LoginTypeAPIKey LoginType = "apiKey"
+	// LoginTypeChatGPT is the browser OAuth flow. The reply carries AuthURL,
+	// which redirects to a callback server codex runs on the app-server's
+	// localhost, so it only completes in a browser on that machine.
+	LoginTypeChatGPT LoginType = "chatgpt"
+	// LoginTypeChatGPTDeviceCode is the device-code flow. The reply carries
+	// UserCode and VerificationURL; the code is entered on any device.
+	LoginTypeChatGPTDeviceCode LoginType = "chatgptDeviceCode"
+)
+
+// LoginAccountParams is the `account/login/start` request payload, a union
+// discriminated on Type. APIKey is set for LoginTypeAPIKey only;
+// CodexStreamlinedLogin for LoginTypeChatGPT only.
+type LoginAccountParams struct {
+	Type                  LoginType `json:"type"`
+	APIKey                string    `json:"apiKey,omitempty"`
+	CodexStreamlinedLogin bool      `json:"codexStreamlinedLogin,omitempty"`
+}
+
+// LoginAccountResponse is the `account/login/start` reply. Which fields are
+// set depends on Type: chatgpt carries LoginID and AuthURL,
+// chatgptDeviceCode carries LoginID, UserCode and VerificationURL, apiKey
+// carries none.
+type LoginAccountResponse struct {
+	Type    LoginType `json:"type"`
+	LoginID string    `json:"loginId,omitempty"`
+	// AuthURL is the browser OAuth URL (chatgpt).
+	AuthURL string `json:"authUrl,omitempty"`
+	// UserCode is the one-time code the person enters (chatgptDeviceCode).
+	UserCode string `json:"userCode,omitempty"`
+	// VerificationURL is where the person enters UserCode
+	// (chatgptDeviceCode).
+	VerificationURL string `json:"verificationUrl,omitempty"`
+}
+
+// CancelLoginAccountParams is the `account/login/cancel` request payload.
+type CancelLoginAccountParams struct {
+	LoginID string `json:"loginId"`
+}
+
+// CancelLoginAccountStatus is the outcome of `account/login/cancel`.
+type CancelLoginAccountStatus string
+
+const (
+	// CancelLoginCanceled means the sign-in was pending and is now stopped;
+	// its `account/login/completed` (success false) follows.
+	CancelLoginCanceled CancelLoginAccountStatus = "canceled"
+	// CancelLoginNotFound means no pending sign-in has that id: it already
+	// ended, was replaced by a newer one, or never existed.
+	CancelLoginNotFound CancelLoginAccountStatus = "notFound"
+)
+
+// CancelLoginAccountResponse is the `account/login/cancel` reply.
+type CancelLoginAccountResponse struct {
+	Status CancelLoginAccountStatus `json:"status"`
+}
+
+// LogoutAccountResponse is the `account/logout` reply; it has no fields.
+type LogoutAccountResponse struct{}
+
+// AccountLoginCompletedNotification is the params payload of
+// `account/login/completed`. LoginID is nil for a sign-in that had none
+// (API key). Error is the server's message when Success is false.
+type AccountLoginCompletedNotification struct {
+	LoginID *string `json:"loginId,omitempty"`
+	Success bool    `json:"success"`
+	Error   *string `json:"error,omitempty"`
+}
+
+// AccountUpdatedNotification is the params payload of `account/updated`.
+// Both fields are strings rather than enums: codex adds auth modes and
+// plans between releases. AuthMode is nil after a logout.
+type AccountUpdatedNotification struct {
+	AuthMode *string `json:"authMode,omitempty"`
+	PlanType *string `json:"planType,omitempty"`
 }

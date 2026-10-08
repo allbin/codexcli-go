@@ -181,6 +181,37 @@ func (e *RateLimitsUpdatedEvent) String() string {
 	return "RateLimitsUpdatedEvent{}"
 }
 
+// AccountLoginCompletedEvent corresponds to `account/login/completed`: a
+// sign-in ended. Broadcast to all subscribers; codex sends it to every
+// connection of the process, so it can be another client's sign-in. To
+// follow a sign-in this Conn started, use the Login handle instead: it gets
+// the outcome without a thread subscription.
+type AccountLoginCompletedEvent struct {
+	// LoginID is empty for a sign-in that had none (API key).
+	LoginID string
+	Success bool
+	// Error is codex's message when Success is false.
+	Error string
+}
+
+func (*AccountLoginCompletedEvent) event() {}
+func (e *AccountLoginCompletedEvent) String() string {
+	return fmt.Sprintf("AccountLoginCompletedEvent{Login: %s, Success: %t}", e.LoginID, e.Success)
+}
+
+// AccountUpdatedEvent corresponds to `account/updated`: the auth mode or
+// plan changed, after a sign-in or a logout. Broadcast to all subscribers.
+// AuthMode is empty after a logout. Call Conn.Account for the full account.
+type AccountUpdatedEvent struct {
+	AuthMode string
+	PlanType string
+}
+
+func (*AccountUpdatedEvent) event() {}
+func (e *AccountUpdatedEvent) String() string {
+	return fmt.Sprintf("AccountUpdatedEvent{AuthMode: %s, Plan: %s}", e.AuthMode, e.PlanType)
+}
+
 // TokenUsageUpdatedEvent corresponds to `thread/tokenUsage/updated`.
 type TokenUsageUpdatedEvent struct {
 	ThreadID   string

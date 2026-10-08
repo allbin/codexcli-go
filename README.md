@@ -2,7 +2,7 @@
 
 Go client for the [`codex app-server`](https://github.com/openai/codex) JSON-RPC protocol. Mirrors the [`claudecli-go`](https://github.com/allbin/claudecli-go) public API so consumers can swap implementations by changing the import path.
 
-**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename/delete, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits and account, aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3, and `DeleteThread` (v0.10.0) against 0.160.0 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
+**Status**: pre-1.0. The core protocol surface is covered: initialize, thread start/resume/rename/delete, turn lifecycle, mid-turn messages (`turn/steer`), approvals and other server requests (with withdrawal), `request_user_input`, subagent threads, content deltas (agent message, command output, reasoning, plan), thread status, turn plans, token usage, rate limits, account and sign-in (device code, browser, API key, logout), aggregated diffs, MCP server status, skills, and a real `Ping`. MCP elicitation typing, fork, dynamic tools, realtime/audio, and the file/exec/plugin RPC surfaces are not yet wired. The features added in v0.7.0 to v0.9.0 were verified live against codex CLI 0.159.3, and `DeleteThread` (v0.10.0) against 0.160.0 (see the `*_live_test.go` files, build tag `integration`); the original end-to-end turn was verified against 0.147.0, and the [reasoning effort](#reasoning-effort) behaviour against 0.153.4.
 
 ## Install
 
@@ -245,6 +245,39 @@ if errors.Is(err, codexcli.ErrNotSignedIn) {
 Both reads return `ErrMethodNotSupported` when the app-server does not implement the method, so a consumer can degrade the feature rather than treat it as a failure. codex rejects an unknown method while deserializing its request union, which surfaces as `-32600 "unknown variant ..."` rather than the spec's `-32601` — the classification handles both.
 
 `Conn.AccountRateLimits` returns the server's backward-compatible single-bucket view. The full reply also carries a per-`limitId` map and a reset-credit block; those decode into `schema.AccountRateLimitsReadResponse` but are not surfaced on `Conn` because nothing needs them yet.
+
+## Signing in
+
+`Conn.StartDeviceCodeLogin` signs codex in to ChatGPT from any device: it returns a short code and a URL, the person opens the URL anywhere (a phone is fine), signs in and enters the code. Nothing is pasted back. This is the flow for a server-side codex.
+
+```go
+login, err := conn.StartDeviceCodeLogin(ctx)
+if err != nil {
+    return err // codex's message, e.g. ChatGPT login disabled by config
+}
+show(login.VerificationURL, login.UserCode, login.ExpiresAt)
+
+switch err := login.Wait(ctx); {
+case err == nil:
+    // Signed in; auth.json is written to this process's CODEX_HOME.
+case errors.Is(err, codexcli.ErrLoginTimedOut):
+    // Nobody finished in time; start again.
+case errors.Is(err, codexcli.ErrLoginCanceled):
+    // login.Cancel stopped it.
+case errors.Is(err, codexcli.ErrLoginFailed):
+    // Refused; err.(*codexcli.LoginError).Message is codex's text.
+case errors.Is(err, codexcli.ErrProcessExited):
+    // The app-server died, so the attempt died with it.
+}
+```
+
+- **The attempt lives in the app-server process.** codex polls OpenAI from a task inside it and writes `auth.json` when the person finishes, so keep the `Conn` open until `Done` closes. `Conn.Close` abandons it. A `ctx` passed to `Wait` only bounds the wait; `Login.Cancel` stops the attempt.
+- **The code lives 15 minutes.** codex stops polling at that point and the handle ends with `ErrLoginTimedOut` (codex's message: `device auth timed out after 15 minutes`). The server does not report the deadline; `Login.ExpiresAt` is computed from codex's own constant.
+- **One attempt per process.** A new start replaces a pending one, which ends with `Login was not completed`. codex sends that same message for a cancel, so only a `Cancel` on that handle makes it `ErrLoginCanceled`.
+- **Other processes on the same `CODEX_HOME` see the account.** After a device-code sign-in, `account/read` reported the ChatGPT account on an app-server that was already running before the sign-in, as well as on a fresh one (codex 0.160.1, one run).
+- The outcome also arrives as `AccountLoginCompletedEvent` and `AccountUpdatedEvent`, broadcast to thread subscribers. codex sends them to every connection of the process, so they can belong to another client's sign-in; the `Login` handle needs no thread.
+
+`StartBrowserLogin` returns an OAuth `AuthURL` instead, with a 10-minute deadline. OpenAI redirects it to a callback server on localhost of the machine running codex, so it only completes in a browser on that machine. `LoginWithAPIKey` stores an API key synchronously, and `Logout` removes the credentials and cancels a pending attempt. Every entry point reports `ErrMethodNotSupported` on an app-server without the methods.
 
 ## Which codex will I run, and how do I update it?
 
@@ -515,6 +548,8 @@ The event stream surfaces typed events for the full server notification set:
 | `WarningEvent` | `warning`, `guardianWarning` | User-facing advisory that is not a turn failure |
 | `ConfigWarningEvent` | `configWarning` | A problem in the user's `config.toml`, raised at connect (broadcast) |
 | `DeprecationNoticeEvent` | `deprecationNotice` | A protocol surface is going away — log these (broadcast) |
+| `AccountLoginCompletedEvent` | `account/login/completed` | A sign-in ended; follow your own through the `Login` handle (broadcast) |
+| `AccountUpdatedEvent` | `account/updated` | Auth mode or plan changed after a sign-in or logout (broadcast) |
 | `SkillsChangedEvent` | `skills/changed` | Local skill files changed — re-run `Conn.ListSkills` (broadcast to all subscribers) |
 | `ErrorEvent` | `error` | Recoverable or fatal error |
 | `ApprovalRequestEvent` | (server requests) | Approval request surfaced alongside callback dispatch |

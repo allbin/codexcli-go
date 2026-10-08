@@ -48,6 +48,12 @@
 // reports ErrNotSignedIn when nobody is logged in — the two "nothing to
 // show" outcomes, distinct from a failure.
 //
+// Sign-in: Conn.StartDeviceCodeLogin returns a Login carrying a code and a
+// URL the person uses on any device; Login.Wait reports the outcome, which
+// codex sends later as account/login/completed. The attempt runs inside the
+// app-server process, so keep the Conn open until Login.Done closes.
+// StartBrowserLogin, LoginWithAPIKey and Logout bind the other variants.
+//
 // Models: ListModels reads the codex CLI's on-disk model cache
 // ($CODEX_HOME/models_cache.json) and returns []ModelInfo. Conn.ListModels
 // queries the running server via the model/list RPC for live availability

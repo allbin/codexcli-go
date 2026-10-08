@@ -213,6 +213,9 @@ type Conn struct {
 	// childReg tracks subagent threads; see subagent.go.
 	childReg childRegistry
 
+	// logins pairs account/login/completed with Login handles; see login.go.
+	logins loginRegistry
+
 	// cmdOutput reconstructs commandExecution output from streamed
 	// deltas when WithAccumulatedOutput is set. Self-synchronized.
 	cmdOutput cmdOutputAccumulator
@@ -775,6 +778,31 @@ func (c *Conn) dispatchNotification(method string, params json.RawMessage) {
 		var p schema.AccountRateLimitsUpdatedNotification
 		if err := json.Unmarshal(params, &p); err == nil {
 			c.broadcastEvent(&RateLimitsUpdatedEvent{RateLimits: p.RateLimits})
+		}
+	case schema.MethodAccountLoginCompleted:
+		var p schema.AccountLoginCompletedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			c.logins.complete(p)
+			ev := &AccountLoginCompletedEvent{Success: p.Success}
+			if p.LoginID != nil {
+				ev.LoginID = *p.LoginID
+			}
+			if p.Error != nil {
+				ev.Error = *p.Error
+			}
+			c.broadcastEvent(ev)
+		}
+	case schema.MethodAccountUpdated:
+		var p schema.AccountUpdatedNotification
+		if err := json.Unmarshal(params, &p); err == nil {
+			ev := &AccountUpdatedEvent{}
+			if p.AuthMode != nil {
+				ev.AuthMode = *p.AuthMode
+			}
+			if p.PlanType != nil {
+				ev.PlanType = *p.PlanType
+			}
+			c.broadcastEvent(ev)
 		}
 	case "thread/tokenUsage/updated":
 		var p schema.ThreadTokenUsageUpdatedNotification

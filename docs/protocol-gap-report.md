@@ -530,7 +530,14 @@ partially supported at the request level.
 `skills/extraRoots/set`, `mcpServerStatus/list`, `thread/start`, `thread/resume`,
 `turn/start`, `turn/interrupt`, `account/read`, `account/rateLimits/read`. Added
 since, without recounting the totals above: `thread/name/set`, `turn/steer`,
-`thread/delete`.
+`thread/delete`, `account/login/start`, `account/login/cancel`, `account/logout`.
+
+`account/login/start` (`Conn.StartDeviceCodeLogin`, `StartBrowserLogin`,
+`LoginWithAPIKey`) on codex 0.160.1: the device-code variant returns a code and
+`https://auth.openai.com/codex/device`, and a person completed it `[live]`. The 15-minute
+code lifetime and the 10-minute browser timeout are codex constants, not on the wire
+(`codex-rs/login/src/device_code_auth.rs`, `app-server/.../account_processor.rs` at
+commit ea27864). The `chatgptAuthTokens` and Bedrock variants are not bound.
 
 `thread/delete` (`Conn.DeleteThread`) on codex 0.160.0 removes the rollout and every
 `thread_history_1.sqlite` / `state_5.sqlite` row for the thread, and deletes the subagent
@@ -544,7 +551,6 @@ at commit e72da2b `[unverified]` live.
 
 **Missing, stable (83)**:
 
-`account/login/cancel`, `account/login/start`, `account/logout`,
 `account/rateLimitResetCredit/consume`,
 `account/sendAddCreditsNudgeEmail`, `account/usage/read`, `account/workspaceMessages/read`,
 `app/installed`, `app/list`, `app/read`, `command/exec`, `command/exec/resize`,
@@ -602,7 +608,7 @@ connections* `[live]`*)*,
 `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`,
 `item/fileChange/patchUpdated`, `item/reasoning/textDelta`,
 `item/reasoning/summaryTextDelta`, `item/reasoning/summaryPartAdded`,
-`account/rateLimits/updated`, `skills/changed`, `mcpServer/startupStatus/updated`,
+`account/rateLimits/updated`, `account/login/completed`, `account/updated`, `skills/changed`, `mcpServer/startupStatus/updated`,
 `model/rerouted`, `warning`, `guardianWarning`, `configWarning`, `deprecationNotice`, `error`.
 
 **Missing** (falls through to `UnknownEvent`, so forward-compatible but untyped) — ranked by
@@ -624,7 +630,6 @@ relevance to a session orchestrator:
 | `hook/started`, `hook/completed` | `hooks` is default-on |
 | `thread/archived`, `thread/unarchived` | Session list sync (`thread/deleted` is now `ThreadDeletedEvent`) |
 | `mcpServer/oauthLogin/completed` | MCP auth flow |
-| `account/updated`, `account/login/completed` | Auth state |
 | `fs/changed` | Only if `fs/watch` is used |
 | `app/list/updated`, `skills/changed` | Catalog changes |
 | `command/exec/outputDelta`, `process/outputDelta`, `process/exited` | Client-driven exec |

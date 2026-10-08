@@ -15,6 +15,30 @@ or pin a specific version (e.g. `@v0.12.1`).
 
 ## [Unreleased]
 
+### Added
+
+- **Sign in from any device: `Conn.StartDeviceCodeLogin`.** Binds
+  `account/login/start` {type: chatgptDeviceCode}: it returns a `*Login`
+  with `UserCode`, `VerificationURL` and `ExpiresAt`, and `Login.Wait` /
+  `Done` / `Err` report the outcome codex sends later as
+  `account/login/completed`. Failures are a `*LoginError` carrying codex's
+  message (`ErrLoginFailed`), with `ErrLoginTimedOut` for codex's
+  15-minute deadline and `ErrLoginCanceled` for `Login.Cancel`
+  (`account/login/cancel`; `ErrLoginNotFound` when the attempt already
+  ended). The attempt runs inside the app-server, so the process dying
+  ends the handle with the exit error. Checked live against codex 0.160.1
+  in a throwaway `CODEX_HOME`: a person completed a sign-in, after which
+  `account/read` reported the ChatGPT account on the signing process, on
+  one already running in the same home, and on a fresh one (one run).
+- `Conn.StartBrowserLogin` (`chatgpt`, returns `AuthURL`; only completes in
+  a browser on the codex machine), `Conn.LoginWithAPIKey` and
+  `Conn.Logout` (`account/logout`).
+- `AccountLoginCompletedEvent` and `AccountUpdatedEvent` for
+  `account/login/completed` and `account/updated`, broadcast to thread
+  subscribers; they arrived as `UnknownEvent` before.
+- Schema types for the login, cancel and logout requests and both
+  notifications.
+
 ## [0.12.1] - 2026-10-07
 
 Cancelling `Update` on unix can no longer break an npm-global install.

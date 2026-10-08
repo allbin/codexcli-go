@@ -47,6 +47,18 @@ var (
 	// the probe request within the timeout: the process is running but
 	// its request loop is not responding.
 	ErrPingTimeout = errors.New("codexcli: ping timed out")
+	// ErrLoginFailed matches every *LoginError: codex reported the sign-in
+	// as failed.
+	ErrLoginFailed = errors.New("codexcli: login failed")
+	// ErrLoginCanceled matches a *LoginError for an attempt stopped by its
+	// own Login.Cancel.
+	ErrLoginCanceled = errors.New("codexcli: login canceled")
+	// ErrLoginTimedOut matches a *LoginError for an attempt codex gave up
+	// on at its deadline (Login.ExpiresAt): start a new one.
+	ErrLoginTimedOut = errors.New("codexcli: login timed out")
+	// ErrLoginNotFound is returned by Login.Cancel when codex has no pending
+	// attempt with that id.
+	ErrLoginNotFound = errors.New("codexcli: login not found")
 )
 
 // classifyTurnInputError maps codex's rejections of turn/steer and
