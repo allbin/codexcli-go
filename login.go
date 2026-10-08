@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/allbin/codexcli-go/schema"
@@ -20,6 +19,10 @@ const (
 	deviceCodeLoginLifetime = 15 * time.Minute
 	browserLoginLifetime    = 10 * time.Minute
 )
+
+// abandonedStartTimeout bounds how long a start whose caller gave up keeps
+// waiting for codex's reply, so it can cancel the attempt that reply names.
+const abandonedStartTimeout = 2 * time.Minute
 
 // Login is one ChatGPT sign-in running inside the app-server process.
 //
@@ -54,15 +57,23 @@ type Login struct {
 
 	// ExpiresAt is when codex gives up on the attempt: 15 minutes after the
 	// start for a device code, 10 for a browser sign-in, taken from codex's
-	// source and the local clock when the start was answered. The server
-	// does not report it. At the deadline Err becomes ErrLoginTimedOut.
+	// source and the local clock when the start was sent, so it errs early.
+	// The server does not report it. At the deadline Err becomes ErrLoginTimedOut.
 	ExpiresAt time.Time
 
-	conn     *Conn
-	done     chan struct{}
-	once     sync.Once
-	err      error
-	canceled atomic.Bool
+	conn *Conn
+	done chan struct{}
+	once sync.Once
+	err  error
+
+	// mu guards the cancel bookkeeping. codex reports a canceled attempt and
+	// a replaced one with the same message, and may send it before or after
+	// it answers account/login/cancel, so that outcome is held until every
+	// Cancel in flight has its answer.
+	mu       sync.Mutex
+	cancels  int
+	canceled bool // codex answered a Cancel with "canceled"
+	held     *schema.AccountLoginCompletedNotification
 }
 
 // Done is closed when the attempt has ended; Err then reports how.
@@ -95,23 +106,71 @@ func (l *Login) Wait(ctx context.Context) error {
 // *LoginError matching ErrLoginCanceled, unless the sign-in finished first:
 // the outcome is whatever Done reports. Returns ErrLoginNotFound when codex
 // has no pending attempt with this ID: it already ended or was replaced.
+// When the cancel request itself fails, the outcome is reported as a plain
+// failure, since nothing confirms this Cancel stopped it.
 func (l *Login) Cancel(ctx context.Context) error {
 	if err := l.conn.checkExited(); err != nil {
 		return err
 	}
-	l.canceled.Store(true)
+	l.mu.Lock()
+	l.cancels++
+	l.mu.Unlock()
+
 	params := schema.CancelLoginAccountParams{LoginID: l.ID}
 	var resp schema.CancelLoginAccountResponse
-	if err := l.conn.rpc.Request(ctx, schema.MethodAccountLoginCancel, params, &resp); err != nil {
+	err := l.conn.rpc.Request(ctx, schema.MethodAccountLoginCancel, params, &resp)
+
+	l.mu.Lock()
+	l.cancels--
+	if err == nil && resp.Status == schema.CancelLoginCanceled {
+		l.canceled = true
+	}
+	var held *schema.AccountLoginCompletedNotification
+	if l.cancels == 0 {
+		held, l.held = l.held, nil
+	}
+	canceled := l.canceled
+	l.mu.Unlock()
+	if held != nil {
+		l.finish(loginOutcome(l.ID, *held, canceled))
+	}
+
+	if err != nil {
 		return l.conn.promoteRPCError(schema.MethodAccountLoginCancel, err)
 	}
 	if resp.Status != schema.CancelLoginCanceled {
-		// Not ours to stop: a "not completed" outcome still on its way
-		// came from a replacing start or a logout, not this Cancel.
-		l.canceled.Store(false)
 		return fmt.Errorf("%s %s: %w", schema.MethodAccountLoginCancel, l.ID, ErrLoginNotFound)
 	}
 	return nil
+}
+
+// deliver ends the attempt with codex's completion, or holds a "not
+// completed" one while a Cancel is waiting to learn whether it was the
+// cause.
+func (l *Login) deliver(n schema.AccountLoginCompletedNotification) {
+	l.mu.Lock()
+	if l.cancels > 0 && !n.Success && loginMessage(n) == loginNotCompletedMessage {
+		l.held = &n
+		l.mu.Unlock()
+		return
+	}
+	canceled := l.canceled
+	l.mu.Unlock()
+	l.finish(loginOutcome(l.ID, n, canceled))
+}
+
+// abandon ends the attempt because the process is gone, unless a held
+// completion already says how it ended.
+func (l *Login) abandon(err error) {
+	l.mu.Lock()
+	held, canceled := l.held, l.canceled
+	l.held = nil
+	l.mu.Unlock()
+	if held != nil {
+		l.finish(loginOutcome(l.ID, *held, canceled))
+		return
+	}
+	l.finish(fmt.Errorf("login %s: %w", l.ID, err))
 }
 
 func (l *Login) finish(err error) {
@@ -157,33 +216,49 @@ func isLoginTimeoutMessage(msg string) bool {
 }
 
 // loginRegistry pairs `account/login/completed` notifications with the
-// Login handles waiting on them. A completion can be read before the
-// handle registers: the read loop hands the start reply to the caller and
-// keeps reading, so a fast failure may be dispatched first. Those wait in
-// early, which is bounded because nothing would ever drain completions for
-// sign-ins this library did not start (another client's, broadcast to all).
+// Login handles waiting on them. A completion can be read before its handle
+// registers: the read loop hands the start reply to the caller and keeps
+// reading, so a fast outcome may be dispatched first. Completions read while
+// any start is awaiting its reply are kept in early until the last of those
+// starts registers; outside that window nobody could claim one, so it is
+// dropped.
 type loginRegistry struct {
 	mu      sync.Mutex
 	waiting map[string]*Login
+	starts  int
 	early   map[string]schema.AccountLoginCompletedNotification
-	order   []string
 }
 
-const maxEarlyLoginCompletions = 16
-
-func (r *loginRegistry) register(l *Login) {
+func (r *loginRegistry) beginStart() {
 	r.mu.Lock()
-	if n, ok := r.early[l.ID]; ok {
-		delete(r.early, l.ID)
-		r.mu.Unlock()
-		l.finish(loginOutcome(l, n))
-		return
-	}
-	if r.waiting == nil {
-		r.waiting = map[string]*Login{}
-	}
-	r.waiting[l.ID] = l
+	r.starts++
 	r.mu.Unlock()
+}
+
+// endStart closes a beginStart. l is the started attempt, or nil when the
+// start failed.
+func (r *loginRegistry) endStart(l *Login) {
+	r.mu.Lock()
+	r.starts--
+	var n schema.AccountLoginCompletedNotification
+	var early bool
+	if l != nil {
+		if n, early = r.early[l.ID]; early {
+			delete(r.early, l.ID)
+		} else {
+			if r.waiting == nil {
+				r.waiting = map[string]*Login{}
+			}
+			r.waiting[l.ID] = l
+		}
+	}
+	if r.starts == 0 {
+		r.early = nil
+	}
+	r.mu.Unlock()
+	if early {
+		l.deliver(n)
+	}
 }
 
 func (r *loginRegistry) unregister(id string) {
@@ -198,35 +273,34 @@ func (r *loginRegistry) complete(n schema.AccountLoginCompletedNotification) {
 	}
 	id := *n.LoginID
 	r.mu.Lock()
-	l, ok := r.waiting[id]
-	if ok {
+	if l, ok := r.waiting[id]; ok {
 		delete(r.waiting, id)
 		r.mu.Unlock()
-		l.finish(loginOutcome(l, n))
+		l.deliver(n)
 		return
 	}
-	if r.early == nil {
-		r.early = map[string]schema.AccountLoginCompletedNotification{}
+	if r.starts > 0 {
+		if r.early == nil {
+			r.early = map[string]schema.AccountLoginCompletedNotification{}
+		}
+		r.early[id] = n
 	}
-	if len(r.order) >= maxEarlyLoginCompletions {
-		delete(r.early, r.order[0])
-		r.order = r.order[1:]
-	}
-	r.early[id] = n
-	r.order = append(r.order, id)
 	r.mu.Unlock()
 }
 
-func loginOutcome(l *Login, n schema.AccountLoginCompletedNotification) error {
+func loginMessage(n schema.AccountLoginCompletedNotification) string {
+	if n.Error != nil && *n.Error != "" {
+		return *n.Error
+	}
+	return "sign-in failed"
+}
+
+func loginOutcome(id string, n schema.AccountLoginCompletedNotification, canceled bool) error {
 	if n.Success {
 		return nil
 	}
-	msg := "sign-in failed"
-	if n.Error != nil && *n.Error != "" {
-		msg = *n.Error
-	}
-	canceled := l.canceled.Load() && msg == loginNotCompletedMessage
-	return &LoginError{LoginID: l.ID, Message: msg, Canceled: canceled}
+	msg := loginMessage(n)
+	return &LoginError{LoginID: id, Message: msg, Canceled: canceled && msg == loginNotCompletedMessage}
 }
 
 // loginNotCompletedMessage is what codex reports for a sign-in it stopped
@@ -248,8 +322,9 @@ const loginNotCompletedMessage = "Login was not completed"
 // "device code login is not enabled for this Codex server. ...") or when
 // config forces API-key login ("ChatGPT login is disabled. ...").
 //
-// If ctx ends before codex answers, codex may have started an attempt no
-// handle tracks; it runs until its deadline or the next start replaces it.
+// If ctx ends before codex answers, StartDeviceCodeLogin returns ctx.Err()
+// at once and cancels the attempt codex started, if any, when its reply
+// arrives, so no attempt runs without a handle.
 func (c *Conn) StartDeviceCodeLogin(ctx context.Context) (*Login, error) {
 	return c.startLogin(ctx, schema.LoginAccountParams{Type: schema.LoginTypeChatGPTDeviceCode}, deviceCodeLoginLifetime)
 }
@@ -269,15 +344,50 @@ func (c *Conn) startLogin(ctx context.Context, params schema.LoginAccountParams,
 	if err := c.checkExited(); err != nil {
 		return nil, err
 	}
-	var resp schema.LoginAccountResponse
-	if err := c.rpc.Request(ctx, schema.MethodAccountLoginStart, params, &resp); err != nil {
+	sent := time.Now()
+	c.logins.beginStart()
+	type reply struct {
+		resp schema.LoginAccountResponse
+		err  error
+	}
+	replies := make(chan reply, 1)
+	go func() {
+		// Not bound to ctx: a start the caller gives up on still reads its
+		// reply, so the attempt codex created can be canceled.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), abandonedStartTimeout)
+		defer cancel()
+		var r reply
+		r.err = c.rpc.Request(rctx, schema.MethodAccountLoginStart, params, &r.resp)
+		replies <- r
+	}()
+	select {
+	case r := <-replies:
+		return c.registerLogin(r.resp, r.err, sent, lifetime)
+	case <-ctx.Done():
+		go func() {
+			r := <-replies
+			if l, err := c.registerLogin(r.resp, r.err, sent, lifetime); err == nil {
+				cctx, cancel := context.WithTimeout(context.Background(), abandonedStartTimeout)
+				defer cancel()
+				_ = l.Cancel(cctx)
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+// registerLogin turns a start reply into a tracked Login, closing the
+// startLogin's beginStart either way.
+func (c *Conn) registerLogin(resp schema.LoginAccountResponse, err error, sent time.Time, lifetime time.Duration) (*Login, error) {
+	if err == nil && resp.LoginID == "" {
+		err = fmt.Errorf("reply of type %q has no loginId", resp.Type)
+	}
+	if err != nil {
+		c.logins.endStart(nil)
 		if isMethodNotSupportedError(err) {
 			return nil, fmt.Errorf("%s: %w", schema.MethodAccountLoginStart, ErrMethodNotSupported)
 		}
 		return nil, c.promoteRPCError(schema.MethodAccountLoginStart, err)
-	}
-	if resp.LoginID == "" {
-		return nil, fmt.Errorf("%s: reply of type %q has no loginId", schema.MethodAccountLoginStart, resp.Type)
 	}
 	l := &Login{
 		ID:              resp.LoginID,
@@ -285,23 +395,23 @@ func (c *Conn) startLogin(ctx context.Context, params schema.LoginAccountParams,
 		UserCode:        resp.UserCode,
 		VerificationURL: resp.VerificationURL,
 		AuthURL:         resp.AuthURL,
-		ExpiresAt:       time.Now().Add(lifetime),
+		ExpiresAt:       sent.Add(lifetime),
 		conn:            c,
 		done:            make(chan struct{}),
 	}
-	c.logins.register(l)
+	c.logins.endStart(l)
 	go func() {
 		select {
 		case <-l.done:
 		case <-c.waitDone:
 			// The read loop has exited, so a completion it read was
-			// already delivered and finish below is a no-op.
+			// already delivered and abandon only reports the exit.
 			c.logins.unregister(l.ID)
 			err := error(ErrClosed)
 			if ex := c.exitErr.Load(); ex != nil {
 				err = ex
 			}
-			l.finish(fmt.Errorf("login %s: %w", l.ID, err))
+			l.abandon(err)
 		}
 	}()
 	return l, nil

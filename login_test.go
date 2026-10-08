@@ -276,26 +276,97 @@ func TestLogin_ConnClosed(t *testing.T) {
 
 // TestLoginRegistry_CompletionBeforeRegister: the read loop can dispatch a
 // completion before the start caller registers its handle; it must still
-// reach it.
+// reach it, however many other completions arrive meanwhile. Completions
+// read while no start is in flight are dropped.
 func TestLoginRegistry_CompletionBeforeRegister(t *testing.T) {
 	var r loginRegistry
 	id := testLoginID
 	msg := "boom"
+	r.beginStart()
 	r.complete(schema.AccountLoginCompletedNotification{LoginID: &id, Error: &msg})
+	for i := 0; i < 100; i++ {
+		other := string(rune('a' + i))
+		r.complete(schema.AccountLoginCompletedNotification{LoginID: &other, Success: true})
+	}
 	l := &Login{ID: id, done: make(chan struct{})}
-	r.register(l)
+	r.endStart(l)
 	var lerr *LoginError
 	if !errors.As(l.Err(), &lerr) || lerr.Message != "boom" {
 		t.Fatalf("err = %v, want the early completion", l.Err())
 	}
-
-	// Completions nobody claims stay bounded.
-	for i := 0; i < 3*maxEarlyLoginCompletions; i++ {
-		other := string(rune('a' + i))
-		r.complete(schema.AccountLoginCompletedNotification{LoginID: &other, Success: true})
+	if r.early != nil || len(r.waiting) != 0 {
+		t.Errorf("early = %d, waiting = %d after the last start, want both empty", len(r.early), len(r.waiting))
 	}
-	if len(r.early) > maxEarlyLoginCompletions || len(r.order) > maxEarlyLoginCompletions {
-		t.Errorf("early = %d, order = %d, want <= %d", len(r.early), len(r.order), maxEarlyLoginCompletions)
+
+	stray := "stray"
+	r.complete(schema.AccountLoginCompletedNotification{LoginID: &stray, Success: true})
+	if len(r.early) != 0 {
+		t.Errorf("kept a completion with no start in flight")
+	}
+}
+
+// TestLoginCancel_OutcomeBeforeAnswer: codex may send "not completed"
+// before it answers the cancel. The outcome is classified by the answer:
+// canceled is this Cancel's doing, notFound is not.
+func TestLoginCancel_OutcomeBeforeAnswer(t *testing.T) {
+	for _, status := range []string{"canceled", "notFound"} {
+		t.Run(status, func(t *testing.T) {
+			_, login, _ := connectWithDeviceLogin(t, nil, func(fix *BidiFixtureExecutor) accountHandlers {
+				return accountHandlers{
+					schema.MethodAccountLoginCancel: func(id, _ json.RawMessage) {
+						loginCompleted(fix, testLoginID, false, "Login was not completed")
+						time.Sleep(50 * time.Millisecond)
+						_ = fix.SendResponse(id, map[string]any{"status": status})
+					},
+				}
+			})
+			cerr := login.Cancel(context.Background())
+			err := waitLogin(t, login)
+			if !errors.Is(err, ErrLoginFailed) {
+				t.Fatalf("err = %v, want ErrLoginFailed", err)
+			}
+			if status == "canceled" {
+				if cerr != nil || !errors.Is(err, ErrLoginCanceled) {
+					t.Errorf("Cancel = %v, err = %v; want nil and ErrLoginCanceled", cerr, err)
+				}
+			} else if !errors.Is(cerr, ErrLoginNotFound) || errors.Is(err, ErrLoginCanceled) {
+				t.Errorf("Cancel = %v, err = %v; want ErrLoginNotFound and not ErrLoginCanceled", cerr, err)
+			}
+		})
+	}
+}
+
+// TestStartDeviceCodeLogin_AbandonedStart: a start whose ctx ends before
+// codex answers returns at once, and the attempt codex then reports is
+// canceled rather than left running with no handle.
+func TestStartDeviceCodeLogin_AbandonedStart(t *testing.T) {
+	gotCancel := make(chan json.RawMessage, 1)
+	conn := connectForAccount(t, func(fix *BidiFixtureExecutor) accountHandlers {
+		return accountHandlers{
+			schema.MethodAccountLoginStart: func(id, _ json.RawMessage) {
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					deviceStartReply(fix, id)
+				}()
+			},
+			schema.MethodAccountLoginCancel: func(id, params json.RawMessage) {
+				gotCancel <- params
+				_ = fix.SendResponse(id, map[string]any{"status": "canceled"})
+			},
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if l, err := conn.StartDeviceCodeLogin(ctx); l != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("start = %v, %v; want nil, DeadlineExceeded", l, err)
+	}
+	select {
+	case p := <-gotCancel:
+		if s := string(p); s != `{"loginId":"`+testLoginID+`"}` {
+			t.Errorf("cancel params = %s", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("abandoned attempt was not canceled")
 	}
 }
 

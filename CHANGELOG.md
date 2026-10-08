@@ -25,7 +25,10 @@ or pin a specific version (e.g. `@v0.12.1`).
   message (`ErrLoginFailed`), with `ErrLoginTimedOut` for codex's
   15-minute deadline and `ErrLoginCanceled` for `Login.Cancel`
   (`account/login/cancel`; `ErrLoginNotFound` when the attempt already
-  ended). The attempt runs inside the app-server, so the process dying
+  ended). codex sends the same "Login was not completed" for a cancel and
+  for a replacing start, before or after it answers the cancel; the outcome
+  is held until the cancel's answer decides which. A start whose `ctx` ends
+  before codex answers cancels the attempt codex created. The attempt runs inside the app-server, so the process dying
   ends the handle with the exit error. Checked live against codex 0.160.1
   in a throwaway `CODEX_HOME`: a person completed a sign-in, after which
   `account/read` reported the ChatGPT account on the signing process, on
