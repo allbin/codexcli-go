@@ -61,8 +61,14 @@ func WithBinaryPath(path string) Option {
 }
 
 // WithCodexHome overrides the codex home directory used by ListModels
-// when locating the on-disk models cache. Takes precedence over the
-// CODEX_HOME environment variable and the $HOME/.codex fallback.
+// when locating the on-disk models cache, and by DetectInstall, Update,
+// LatestPublished and Doctor. Takes precedence over the CODEX_HOME
+// environment variable and the $HOME/.codex fallback.
+//
+// It does not reach the app-server: Run and Connect start codex with the
+// process environment plus WithEnv, so a session's home is set with
+// WithEnv(map[string]string{"CODEX_HOME": dir}). A consumer running
+// sessions in its own home passes both.
 func WithCodexHome(dir string) Option {
 	return func(o *options) { o.codexHome = dir }
 }
@@ -103,7 +109,18 @@ func WithModel(model string) Option {
 	return func(o *options) { o.model = model }
 }
 
-// WithModelProvider overrides the model provider on thread/start.
+// WithModelProvider overrides the model provider on thread/start. The
+// id names a [model_providers.<id>] table in the CODEX_HOME's
+// config.toml (or one sent with WithThreadConfig).
+//
+// Observed against codex 0.162.1 (provider_live_test.go): a provider
+// with wire_api = "responses" needs only POST <base_url>/responses
+// streaming SSE, and codex sends the variable named by env_key as the
+// bearer token, not OPENAI_API_KEY; with that variable unset the turn
+// fails ("Missing environment variable"). wire_api = "chat" is no longer
+// supported: app-server still starts, but thread/start fails with
+// -32600 "failed to load configuration: ... `wire_api = "chat"` is no
+// longer supported", and so do config reads.
 func WithModelProvider(provider string) Option {
 	return func(o *options) { o.modelProvider = provider }
 }
@@ -323,8 +340,9 @@ func WithWorkDir(dir string) Option {
 	return func(o *options) { o.workDir = dir }
 }
 
-// WithEnv merges environment variables into the subprocess env. Use
-// CODEX_HOME here to pin a sandboxed home for testing.
+// WithEnv merges environment variables into the subprocess env. It is
+// the only way a session's CODEX_HOME reaches app-server (see
+// WithCodexHome), and where a custom provider's env_key variable goes.
 func WithEnv(env map[string]string) Option {
 	return func(o *options) {
 		if o.env == nil {
