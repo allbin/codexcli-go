@@ -11,9 +11,53 @@ Install the latest release with:
 go get github.com/allbin/codexcli-go@latest
 ```
 
-or pin a specific version (e.g. `@v0.13.0`).
+or pin a specific version (e.g. `@v0.13.1`).
 
 ## [Unreleased]
+
+## [0.13.1] - 2026-10-15
+
+Documentation and live tests for running codex in a consumer-owned
+`CODEX_HOME` with its own login or a custom model provider. No code
+changes. Checked live against codex 0.162.1, three runs each.
+
+### Documentation
+
+- **`WithCodexHome` does not reach app-server.** It feeds `ListModels`,
+  `DetectInstall`, `Update`, `LatestPublished` and `Doctor`; `Run` and
+  `Connect` start codex with the process environment plus `WithEnv`, so a
+  session's home is `WithEnv(map[string]string{"CODEX_HOME": dir})`.
+- **`WithModelProvider` records how a custom provider behaves.** A
+  provider with `wire_api = "responses"` needs only
+  `POST <base_url>/responses` streaming SSE (no `/models` call), and codex
+  sends the variable named by `env_key` as the bearer token, not
+  `OPENAI_API_KEY`; unset, the turn fails with "Missing environment
+  variable". `wire_api = "chat"` is no longer supported: app-server still
+  starts, but `thread/start` fails with -32600 "failed to load
+  configuration: ... `wire_api = "chat"` is no longer supported", and so
+  does `config/read`.
+
+### Tests
+
+- `TestLive_Provider*` (`provider_live_test.go`) run turns against an
+  in-test Responses API stub: responses wire API, missing key, chat wire
+  API.
+- `TestLive_SymlinkedHome` links `config.toml`, `AGENTS.md` and `skills/`
+  into a fresh home. The links survive thread start, a turn, resume, a
+  model change and config writes, but codex writes through them:
+  `config/value/write`, `skills/config/write` and the
+  `[projects."<cwd>"] trust_level = "trusted"` entry for a git-repository
+  cwd (workspace-write and danger-full-access) land in the shared
+  `config.toml` (comments kept), and codex installs its bundled skills
+  into `skills/.system/` of the shared directory. `AGENTS.md` is read,
+  never written.
+- `TestLive_SeparateHomeLogins` forces token refreshes in homes a person
+  signed into (`CODEXCLI_LOGIN_HOMES`). Two homes signed in separately to
+  the same ChatGPT account each rotated their refresh token and stayed
+  signed in. `TestLive_CredentialStoreAvailable` shows which
+  `cli_auth_credentials_store` values work on the machine: without a
+  Secret Service, `keyring` fails sign-in and `auto` falls back to
+  `auth.json`.
 
 ## [0.13.0] - 2026-10-08
 
@@ -831,7 +875,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/allbin/codexcli-go/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/allbin/codexcli-go/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/allbin/codexcli-go/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/allbin/codexcli-go/compare/v0.11.0...v0.12.0
