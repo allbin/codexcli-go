@@ -85,4 +85,6 @@
 // Conn.ResumeThread(ctx, threadID) sends thread/resume to rehydrate a
 // previously persisted thread. Returns ErrThreadNotFound on recoverable
 // errors so callers can fall back to NewThread.
+//
+// Deprecated: moved to github.com/allbin/agentkit/harness/codex (package codex); no further releases here.
 package codexcli

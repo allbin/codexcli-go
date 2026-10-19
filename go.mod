@@ -1,3 +1,4 @@
+// Deprecated: moved to github.com/allbin/agentkit/harness/codex; no further releases here.
 module github.com/allbin/codexcli-go
 
 go 1.23

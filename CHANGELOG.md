@@ -15,6 +15,13 @@ or pin a specific version (e.g. `@v0.13.1`).
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-10-19
+
+### Deprecated
+
+- This module moved to `github.com/allbin/agentkit/harness/codex` in agentkit v0.26.0. This is the last release;
+  the code is unchanged from v0.13.1. Replace the import path to move.
+
 ## [0.13.1] - 2026-10-15
 
 Documentation and live tests for running codex in a consumer-owned
@@ -875,7 +882,8 @@ here on. No breaking changes — everything below is additive.
 - README documents both entry points and gains an `install.go` / `doctor.go`
   row in the architecture table.
 
-[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/allbin/codexcli-go/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/allbin/codexcli-go/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/allbin/codexcli-go/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/allbin/codexcli-go/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/allbin/codexcli-go/compare/v0.12.0...v0.12.1
